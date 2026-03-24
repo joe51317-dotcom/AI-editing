@@ -16,15 +16,19 @@ class ProcessWorker(threading.Thread):
     透過 callback_queue 向 GUI 回報進度。
     """
 
-    def __init__(self, videos, callback_queue, trim_enabled=True,
+    def __init__(self, videos, callback_queue, trim_mode="auto",
+                 trim_enabled=True,
                  speech_threshold=-20, break_threshold=300,
+                 manual_segments=None,
                  youtube_service=None, privacy_status="unlisted",
                  playlist_id=None, thumbnail_path=None,
                  naming_rule="{filename}"):
         super().__init__(daemon=True)
         self.videos = videos  # [{'path': str, 'title': str}, ...]
         self.queue = callback_queue
-        self.trim_enabled = trim_enabled
+        self.trim_mode = trim_mode
+        self.trim_enabled = trim_mode != "skip"
+        self.manual_segments = manual_segments  # list[list[dict]] or None
         self.speech_threshold = speech_threshold
         self.break_threshold = break_threshold
         self.youtube_service = youtube_service
@@ -52,6 +56,54 @@ class ProcessWorker(threading.Thread):
         result = result.replace("{part}", str(part))
         return result
 
+    def _manual_trim(self, video_path, filename):
+        """手動裁剪：根據使用者指定的時間片段直接呼叫 render_video"""
+        from video_renderer import render_video
+
+        base, ext = os.path.splitext(video_path)
+        output_paths = []
+        total_parts = len(self.manual_segments)
+
+        self._send(filename, "status", text="手動裁剪中...")
+        self._send(filename, "progress", value=0.0)
+
+        for i, segments in enumerate(self.manual_segments):
+            if self._stopped():
+                return output_paths
+
+            part_num = i + 1
+            output_path = f"{base}-{part_num}{ext}"
+
+            self._send(filename, "progress",
+                       value=(i / total_parts) * 0.4,
+                       text=f"裁剪 Part {part_num}/{total_parts}...")
+
+            def make_cb(part_idx):
+                def cb(step, current, total):
+                    part_base = (part_idx / total_parts) * 0.4
+                    part_range = 0.4 / total_parts
+                    sub_pct = (current / total * 0.8) if step == "cutting" else 0.9
+                    self._send(filename, "progress",
+                               value=part_base + sub_pct * part_range)
+                return cb
+
+            success = render_video(video_path, segments, output_path,
+                                   progress_callback=make_cb(i))
+
+            if success:
+                output_paths.append(output_path)
+                logger.info(f"  手動裁剪 Part {part_num}: {output_path}")
+            else:
+                logger.error(f"  手動裁剪 Part {part_num} 失敗")
+
+        if output_paths:
+            self._send(filename, "progress", value=0.4,
+                       text=f"手動裁剪完成，{len(output_paths)} 個檔案")
+        else:
+            self._send(filename, "progress", value=0.4, text="手動裁剪失敗")
+
+        return output_paths or [video_path]
+
     def run(self):
         for idx, video in enumerate(self.videos, start=1):
             if self._stopped():
@@ -75,12 +127,15 @@ class ProcessWorker(threading.Thread):
         # === Step 1: 裁剪 ===
         trimmed_files = []
 
-        if self.trim_enabled:
+        if self.trim_mode == "manual" and self.manual_segments:
+            # --- 手動裁剪模式 ---
+            trimmed_files = self._manual_trim(video_path, filename)
+        elif self.trim_mode == "auto":
+            # --- 自動裁剪模式 ---
             self._send(filename, "status", text="偵測靜音中...")
             self._send(filename, "progress", value=0.0)
 
             def trim_progress(pct, detail):
-                # 將 trimmer 的 0.0-1.0 映射到 GUI 的 0.0-0.4
                 overall = pct * 0.4
                 self._send(filename, "progress", value=overall, text=detail)
 
@@ -96,10 +151,10 @@ class ProcessWorker(threading.Thread):
                 trimmed_files = trimmed
                 self._send(filename, "progress", value=0.4, text=f"裁剪完成，{len(trimmed)} 個檔案")
             else:
-                # 沒有需要裁剪的 → 使用原始檔
                 trimmed_files = [video_path]
                 self._send(filename, "progress", value=0.4, text="不需裁剪，使用原始檔")
         else:
+            # --- 跳過裁剪 ---
             trimmed_files = [video_path]
             self._send(filename, "progress", value=0.4, text="跳過裁剪")
 

@@ -1,0 +1,20 @@
+# GUI 專用依賴（在 requirements.txt 基礎上）
+# 安裝: pip install -r requirements-gui.txt
+
+# 原有依賴
+watchdog
+python-dotenv
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+colorama
+
+# GUI 框架
+customtkinter>=5.2.0
+Pillow>=10.0.0
+
+# 拖放支援（可選，沒有的話改用瀏覽按鈕）
+tkinterdnd2>=0.3.0
+
+# 打包（開發用）
+# pyinstaller>=6.0

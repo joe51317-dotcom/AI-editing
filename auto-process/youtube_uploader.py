@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 # Resumable upload 重試設定
 MAX_RETRIES = 5
@@ -56,11 +56,24 @@ def get_credentials(client_secret_path, token_path):
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
+    # 檢查 scope 是否匹配（舊 token 可能只有 youtube.upload）
+    if creds and creds.valid:
+        token_scopes = set(creds.scopes or [])
+        required_scopes = set(SCOPES)
+        if not required_scopes.issubset(token_scopes):
+            logger.info("Token scope 不足，需要重新認證...")
+            creds = None
+
     if creds and creds.expired and creds.refresh_token:
         logger.info("Token 已過期，自動更新中...")
-        creds.refresh(Request())
-        _save_token(creds, token_path)
-    elif not creds or not creds.valid:
+        try:
+            creds.refresh(Request())
+            _save_token(creds, token_path)
+        except Exception:
+            logger.info("Token refresh 失敗，重新認證...")
+            creds = None
+
+    if not creds or not creds.valid:
         if not os.path.exists(client_secret_path):
             logger.error(f"找不到 client_secret.json: {client_secret_path}")
             logger.error("請先到 Google Cloud Console 下載 OAuth2 憑證。")
@@ -92,7 +105,8 @@ def title_from_filename(video_path):
 
 def upload_video(video_path, title=None, description="", tags=None,
                  category_id=None, privacy_status=None,
-                 client_secret_path=None, token_path=None):
+                 client_secret_path=None, token_path=None,
+                 progress_callback=None):
     """
     上傳影片到 YouTube（resumable upload）。
 
@@ -105,6 +119,7 @@ def upload_video(video_path, title=None, description="", tags=None,
         privacy_status: 隱私設定（預設從 .env）
         client_secret_path: OAuth2 client secret 路徑（預設從 .env）
         token_path: token 儲存路徑（預設從 .env）
+        progress_callback: 可選回呼 callback(progress_pct) 0-100
 
     Returns:
         str | None: YouTube 影片 ID，失敗則 None
@@ -158,11 +173,11 @@ def upload_video(video_path, title=None, description="", tags=None,
     logger.info(f"開始上傳: {title}")
     logger.info(f"  隱私: {privacy_status} | 分類: {category_id}")
 
-    video_id = _resumable_upload(request, video_path)
+    video_id = _resumable_upload(request, video_path, progress_callback)
     return video_id
 
 
-def _resumable_upload(request, video_path):
+def _resumable_upload(request, video_path, progress_callback=None):
     """執行 resumable upload，含重試邏輯"""
     response = None
     retry = 0
@@ -174,6 +189,8 @@ def _resumable_upload(request, video_path):
             if status:
                 progress = int(status.progress() * 100)
                 logger.info(f"  上傳進度: {progress}% ({file_size:.0f}MB)")
+                if progress_callback:
+                    progress_callback(progress)
         except HttpError as e:
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 retry = _handle_retry(retry, f"HTTP {e.resp.status}")

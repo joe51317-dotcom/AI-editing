@@ -8,10 +8,12 @@ import tempfile
 import shutil
 import logging
 
+from ffmpeg_manager import get_ffmpeg_path
+
 logger = logging.getLogger(__name__)
 
 
-def render_video(source_video, kept_segments, output_path):
+def render_video(source_video, kept_segments, output_path, progress_callback=None):
     """
     用 FFmpeg stream copy 切割並合併影片片段（無重新編碼，速度快）。
 
@@ -19,6 +21,7 @@ def render_video(source_video, kept_segments, output_path):
         source_video: 來源影片路徑
         kept_segments: 要保留的片段清單 [{'start': 0.0, 'end': 10.0}, ...]
         output_path: 輸出影片路徑
+        progress_callback: 可選回呼 callback(step, current, total) 用於 GUI 進度
 
     Returns:
         bool: 成功與否
@@ -40,8 +43,9 @@ def render_video(source_video, kept_segments, output_path):
 
             seg_filename = os.path.join(temp_dir, f"seg_{i:04d}.mp4")
 
+            ffmpeg = get_ffmpeg_path() or "ffmpeg"
             cmd = [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-ss", str(start),
                 "-t", str(duration),
@@ -61,6 +65,8 @@ def render_video(source_video, kept_segments, output_path):
 
             segment_files.append(seg_filename)
             logger.info(f"  切割片段 {i + 1}/{len(kept_segments)} ({duration:.1f}s)")
+            if progress_callback:
+                progress_callback("cutting", i + 1, len(kept_segments))
 
         if not segment_files:
             logger.warning("沒有保留的片段，跳過裁剪。")
@@ -75,8 +81,11 @@ def render_video(source_video, kept_segments, output_path):
                 safe_path = seg.replace("\\", "/").replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
 
+        if progress_callback:
+            progress_callback("merging", 0, 1)
+
         concat_cmd = [
-            "ffmpeg",
+            get_ffmpeg_path() or "ffmpeg",
             "-y",
             "-f", "concat",
             "-safe", "0",
