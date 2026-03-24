@@ -39,6 +39,7 @@ def detect_silence(video_path, noise_db=-30, min_duration=10):
     cmd = [
         "ffmpeg",
         "-i", video_path,
+        "-vn",
         "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}",
         "-f", "null",
         "-",
