@@ -77,7 +77,10 @@ def get_credentials(client_secret_path, token_path):
         if not os.path.exists(client_secret_path):
             logger.error(f"找不到 client_secret.json: {client_secret_path}")
             logger.error("請先到 Google Cloud Console 下載 OAuth2 憑證。")
-            return None
+            raise FileNotFoundError(
+                f"找不到 OAuth2 憑證: {os.path.basename(client_secret_path)}\n"
+                "請到 Google Cloud Console 下載並放到 credentials/ 目錄"
+            )
 
         flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
         creds = flow.run_local_server(port=0)
