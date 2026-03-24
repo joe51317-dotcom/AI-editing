@@ -21,7 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def trim_course_video(video_path, speech_threshold_db=None, min_duration=None, break_threshold=None):
+def trim_course_video(video_path, speech_threshold_db=None, min_duration=None,
+                      break_threshold=None, progress_callback=None):
     """
     裁剪課程影片：移除開頭/結尾空白，遇到長休息則切成多段影片。
 
@@ -32,6 +33,7 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None, b
         speech_threshold_db: 講課語音門檻 dB（None 則用 .env 設定）
         min_duration: 最短靜音秒數（None 則用 .env 設定）
         break_threshold: 休息判定秒數（None 則用 .env 設定）
+        progress_callback: 可選回呼 callback(stage, detail) 用於 GUI 進度
 
     Returns:
         list[str]: 輸出檔案路徑清單，失敗則空清單
@@ -49,12 +51,17 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None, b
     logger.info(f"開始處理: {os.path.basename(video_path)}")
     logger.info(f"參數: speech_threshold={speech_threshold_db}dB, min_silence={min_duration}s, break={break_threshold}s")
 
-    # Step 1: 偵測靜音並切割成 parts
+    # Step 1: 偵測靜音並切割成 parts（佔總進度 0.0 ~ 0.5）
+    def detection_progress(pct, detail):
+        if progress_callback:
+            progress_callback(pct * 0.5, detail)
+
     parts = split_into_parts(
         video_path,
         speech_threshold_db=speech_threshold_db,
         min_duration=min_duration,
         break_threshold=break_threshold,
+        progress_callback=detection_progress,
     )
 
     if not parts:
@@ -75,12 +82,34 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None, b
     output_paths = []
     input_size = os.path.getsize(video_path) / (1024 * 1024)
 
+    total_parts = len(parts)
     for i, segments in enumerate(parts):
         part_num = i + 1
         output_path = f"{base}-{part_num}{ext}"
 
-        logger.info(f"--- Part {part_num}/{len(parts)} ---")
-        success = render_video(video_path, segments, output_path)
+        logger.info(f"--- Part {part_num}/{total_parts} ---")
+
+        # 裁剪階段佔總進度 0.5 ~ 1.0，每個 part 均分
+        def make_render_cb(part_idx):
+            def render_progress(step, current, total):
+                if progress_callback:
+                    part_base = 0.5 + (part_idx / total_parts) * 0.5
+                    part_range = 0.5 / total_parts
+                    if step == "cutting":
+                        sub_pct = current / total * 0.8
+                    else:  # merging
+                        sub_pct = 0.9
+                    progress_callback(
+                        part_base + sub_pct * part_range,
+                        f"裁剪 Part {part_idx + 1}/{total_parts}",
+                    )
+            return render_progress
+
+        if progress_callback:
+            progress_callback(0.5 + (i / total_parts) * 0.5, f"裁剪 Part {part_num}/{total_parts}...")
+
+        success = render_video(video_path, segments, output_path,
+                               progress_callback=make_render_cb(i))
 
         if success:
             output_size = os.path.getsize(output_path) / (1024 * 1024)
@@ -91,6 +120,8 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None, b
 
     if output_paths:
         logger.info(f"完成! {input_size:.1f}MB → {len(output_paths)} 個檔案")
+        if progress_callback:
+            progress_callback(1.0, f"裁剪完成: {len(output_paths)} 個檔案")
 
     return output_paths
 

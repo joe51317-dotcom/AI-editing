@@ -275,7 +275,7 @@ def find_speech_boundary(video_path, time_point, direction="forward",
         return time_point
 
 
-def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break_threshold=300):
+def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break_threshold=300, progress_callback=None):
     """
     偵測靜音與環境音，按長休息切割成多段影片。
 
@@ -295,8 +295,14 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
     Returns:
         list[list[dict]]: 每個 part 是一組 [{'start': float, 'end': float}, ...]
     """
+    if progress_callback:
+        progress_callback(0.0, "取得影片資訊...")
+
     total_duration = get_video_duration(video_path)
     silence_regions = detect_silence(video_path, noise_db=speech_threshold_db, min_duration=min_duration)
+
+    if progress_callback:
+        progress_callback(0.3, f"偵測到 {len(silence_regions)} 段靜音，分析中...")
 
     # 補全最後一段靜音的 end（如果缺失）
     for region in silence_regions:
@@ -366,8 +372,15 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
 
     # 精確修剪每個 part 邊界（移除開頭/結尾短暫環境音）
     logger.info("精確修剪 part 邊界...")
+    total_boundary_steps = len(parts) * 2  # 每個 part: forward + backward
+    boundary_step = 0
+
     for i, p in enumerate(parts):
-        # 修剪開頭（用 -35dB 低門檻，只找完全靜音的結束點）
+        if progress_callback:
+            pct = 0.3 + (boundary_step / total_boundary_steps) * 0.7
+            progress_callback(pct, f"精確修剪 Part {i+1}/{len(parts)} 開頭邊界...")
+
+        # 修剪開頭
         refined_start = find_speech_boundary(
             video_path, p["start"], direction="forward",
         )
@@ -375,6 +388,11 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
             trimmed = refined_start - p["start"]
             logger.info(f"  Part {i+1}: 修剪開頭 {trimmed:.1f}s 靜音")
             p["start"] = refined_start
+        boundary_step += 1
+
+        if progress_callback:
+            pct = 0.3 + (boundary_step / total_boundary_steps) * 0.7
+            progress_callback(pct, f"精確修剪 Part {i+1}/{len(parts)} 結尾邊界...")
 
         # 修剪結尾
         refined_end = find_speech_boundary(
@@ -384,6 +402,7 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
             trimmed = p["end"] - refined_end
             logger.info(f"  Part {i+1}: 修剪結尾 {trimmed:.1f}s 環境音")
             p["end"] = refined_end
+        boundary_step += 1
 
     # 再次過濾
     parts = [p for p in parts if (p["end"] - p["start"]) >= 1.0]
@@ -398,6 +417,9 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
     total_kept = sum(p["end"] - p["start"] for p in parts)
     total_removed = total_duration - total_kept
     logger.info(f"結果: {len(parts)} 段影片 | 保留 {total_kept:.1f}s / 移除 {total_removed:.1f}s / 原始 {total_duration:.1f}s")
+
+    if progress_callback:
+        progress_callback(1.0, f"分析完成: {len(parts)} 段影片")
     for i, p in enumerate(parts):
         duration = p["end"] - p["start"]
         logger.info(f"  Part {i+1}: {p['start']:.1f}s ~ {p['end']:.1f}s ({duration:.1f}s)")
