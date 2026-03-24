@@ -184,14 +184,15 @@ def find_speech_boundary(video_path, time_point, direction="forward",
             if rms_values[i] > threshold:
                 consecutive += 1
                 if consecutive >= 3:
-                    # 持續性驗證：後續 12 秒內是否回到休息區音量 ≥3s？
-                    verify_end = min(i + 1 + 60, len(rms_values))  # 12s
+                    # 持續性驗證：後續 20 秒內是否回到休息區音量 ≥8s？
+                    # 8 秒閾值：上課中停頓通常 < 8s，真正休息後沉默 > 8s
+                    verify_end = min(i + 1 + 100, len(rms_values))  # 20s
                     silence_streak = 0
                     is_transient = False
                     for j in range(i + 1, verify_end):
                         if rms_values[j] < silence_level:
                             silence_streak += 1
-                            if silence_streak >= 15:  # 3 秒連續沉默
+                            if silence_streak >= 40:  # 8 秒連續沉默
                                 is_transient = True
                                 break
                         else:
@@ -243,14 +244,14 @@ def find_speech_boundary(video_path, time_point, direction="forward",
             if rms_values[i] > threshold:
                 consecutive += 1
                 if consecutive >= 3:
-                    # 持續性驗證（反向）：前方 12 秒內是否回到沉默 ≥3s？
-                    verify_start = max(0, i - 60)
+                    # 持續性驗證（反向）：前方 20 秒內是否回到沉默 ≥8s？
+                    verify_start = max(0, i - 100)
                     silence_streak = 0
                     is_transient = False
                     for j in range(i - 1, verify_start - 1, -1):
                         if rms_values[j] < silence_level:
                             silence_streak += 1
-                            if silence_streak >= 15:
+                            if silence_streak >= 40:
                                 is_transient = True
                                 break
                         else:
