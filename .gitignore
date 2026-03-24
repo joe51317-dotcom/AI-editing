@@ -1,0 +1,10 @@
+.env
+credentials/
+auto-process/inbox/*
+auto-process/processing/*
+auto-process/done/*
+auto-process/failed/*
+auto-process/logs/*
+!auto-process/**/.gitkeep
+__pycache__/
+*.pyc
