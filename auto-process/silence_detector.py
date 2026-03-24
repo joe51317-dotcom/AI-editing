@@ -48,7 +48,8 @@ def detect_silence(video_path, noise_db=-30, min_duration=10):
     ]
 
     logger.info(f"偵測靜音 (noise={noise_db}dB, min_duration={min_duration}s)...")
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                             encoding="utf-8", errors="replace")
 
     stderr = result.stderr
     silence_regions = []
@@ -217,27 +218,67 @@ def find_speech_boundary(video_path, time_point, direction="forward",
         return time_point
 
     else:  # backward
-        # 提取到 boundary 後 3 秒（後 3 秒在休息區 = 安靜基線）
+        # 提取範圍：boundary 前 search_duration + 後延伸檢查 + 深處基線
+        forward_check = 20   # 延伸檢查：boundary 後 20 秒（講師/主持人可能還在講）
+        baseline_skip = 15   # 跳過 15 秒避免語音殘餘汙染基線
+
         ss = max(0, time_point - search_duration)
-        total_duration = search_duration + baseline_duration
+        total_duration = search_duration + forward_check + baseline_skip + baseline_duration
 
         rms_values = _extract_rms_windows(video_path, ss, total_duration,
                                           window_ms=window_ms)
         if not rms_values:
             return time_point
 
-        # 休息區基線（最後 3 秒，用 median）
-        n_tail = max(1, int(baseline_duration / window_sec))
-        n_tail = min(n_tail, len(rms_values))
-        sorted_tail = sorted(rms_values[-n_tail:])
-        break_rms = sorted_tail[len(sorted_tail) // 2]
+        # 基線：從休息區深處取（跳過 boundary 後 25 秒）
+        baseline_start_idx = int((search_duration + forward_check + baseline_skip) / window_sec)
+        if baseline_start_idx < len(rms_values):
+            baseline_windows = rms_values[baseline_start_idx:]
+        else:
+            # 影片尾端不夠長，退回使用最後 3 秒
+            n_tail = max(1, int(baseline_duration / window_sec))
+            baseline_windows = rms_values[-n_tail:]
+
+        if not baseline_windows:
+            return time_point
+
+        sorted_baseline = sorted(baseline_windows)
+        break_rms = sorted_baseline[len(sorted_baseline) // 2]
         threshold = max(break_rms * 3, 100)
         silence_level = max(break_rms * 1.5, 50)
         logger.info(f"    邊界偵測(backward): break_rms={break_rms:.0f}, threshold={threshold:.0f}, silence_level={silence_level:.0f}")
 
-        # 在 boundary 之前的範圍搜尋
         boundary_idx = int(search_duration / window_sec)
-        boundary_idx = min(boundary_idx, len(rms_values) - n_tail)
+
+        # Phase 1: 延伸檢查 — 語音是否延續到 boundary 之後？
+        # 用較高門檻區分「講師語音」和「環境噪音突起」
+        forward_end_idx = min(int((search_duration + forward_check) / window_sec),
+                              len(rms_values))
+        ext_threshold = max(threshold, 200)  # 延伸檢查門檻至少 200
+        silence_end_thresh = 10  # 10 windows = 2 秒連續沉默 → 語音結束
+
+        speech_end_idx = boundary_idx
+        consecutive_silence = 0
+        for i in range(boundary_idx, forward_end_idx):
+            if rms_values[i] > ext_threshold:
+                speech_end_idx = i
+                consecutive_silence = 0
+            else:
+                consecutive_silence += 1
+                if consecutive_silence >= silence_end_thresh:
+                    break  # 語音已結束
+
+        if speech_end_idx > boundary_idx + 2:  # 語音延伸 > 0.6s
+            speech_count = sum(1 for i in range(boundary_idx, speech_end_idx + 1)
+                               if rms_values[i] > ext_threshold)
+            if speech_count >= 3:  # 至少 0.6s 語音
+                extension = (speech_end_idx - boundary_idx) * window_sec
+                if extension <= max_trim:
+                    logger.info(f"    語音延伸 {extension:.1f}s 超過 boundary (ext_threshold={ext_threshold:.0f})")
+                    return time_point + extension + 0.3
+
+        # Phase 2: 標準反向修剪搜尋
+        boundary_idx = min(boundary_idx, len(rms_values) - 1)
 
         consecutive = 0
         for i in range(boundary_idx - 1, -1, -1):
@@ -394,13 +435,16 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
             pct = 0.3 + (boundary_step / total_boundary_steps) * 0.7
             progress_callback(pct, f"精確修剪 Part {i+1}/{len(parts)} 結尾邊界...")
 
-        # 修剪結尾
+        # 修剪或延伸結尾
         refined_end = find_speech_boundary(
             video_path, p["end"], direction="backward",
         )
-        if refined_end < p["end"]:
-            trimmed = p["end"] - refined_end
-            logger.info(f"  Part {i+1}: 修剪結尾 {trimmed:.1f}s 環境音")
+        if refined_end != p["end"]:
+            diff = refined_end - p["end"]
+            if diff < 0:
+                logger.info(f"  Part {i+1}: 修剪結尾 {-diff:.1f}s 環境音")
+            else:
+                logger.info(f"  Part {i+1}: 延伸結尾 {diff:.1f}s（語音延伸至休息區）")
             p["end"] = refined_end
         boundary_step += 1
 
