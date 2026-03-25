@@ -15,7 +15,8 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from config import (
     INBOX_DIR, PROCESSING_DIR, DONE_DIR, FAILED_DIR, LOG_DIR, VIDEO_EXTENSIONS
