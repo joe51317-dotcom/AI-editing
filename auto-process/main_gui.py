@@ -84,6 +84,13 @@ def main():
     except Exception as e:
         logger.warning(f"拖放初始化失敗: {e}")
 
+    # 清理上次異常中斷殘留的暫存目錄
+    try:
+        from video_renderer import cleanup_stale_temp_dirs
+        cleanup_stale_temp_dirs()
+    except Exception:
+        pass
+
     # 啟動 GUI
     from gui.app import AutoProcessApp
 

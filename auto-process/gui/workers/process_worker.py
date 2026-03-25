@@ -96,8 +96,15 @@ class ProcessWorker(threading.Thread):
                                value=part_base + sub_pct * part_range)
                 return cb
 
+            def make_err_cb(fn):
+                def cb(msg):
+                    self._send(fn, "status", text=msg)
+                    logger.error(msg)
+                return cb
+
             success = render_video(video_path, segments, output_path,
-                                   progress_callback=make_cb(i))
+                                   progress_callback=make_cb(i),
+                                   error_callback=make_err_cb(filename))
 
             if success:
                 output_paths.append(output_path)

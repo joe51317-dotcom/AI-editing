@@ -3,17 +3,43 @@
 從 auto-cut-agent/video_renderer.py 簡化而來，作為獨立套件使用。
 """
 import os
+import glob
 import subprocess
 import tempfile
 import shutil
 import logging
+import time
 
 from ffmpeg_manager import get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
 
+# 暫存目錄前綴，用於啟動時清理殘留
+_TEMP_PREFIX = "auto_process_render_"
 
-def render_video(source_video, kept_segments, output_path, progress_callback=None):
+
+def cleanup_stale_temp_dirs(max_age_hours=24):
+    """
+    清理殘留的暫存目錄（上次異常中斷時未清理的）。
+    只刪除超過 max_age_hours 小時的目錄，避免誤刪正在使用中的。
+    """
+    temp_root = tempfile.gettempdir()
+    cutoff = time.time() - (max_age_hours * 3600)
+    cleaned = 0
+    for path in glob.glob(os.path.join(temp_root, f"{_TEMP_PREFIX}*")):
+        try:
+            if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path)
+                cleaned += 1
+                logger.debug(f"清理殘留暫存目錄: {path}")
+        except OSError:
+            pass
+    if cleaned:
+        logger.info(f"已清理 {cleaned} 個殘留暫存目錄")
+
+
+def render_video(source_video, kept_segments, output_path,
+                 progress_callback=None, error_callback=None):
     """
     用 FFmpeg stream copy 切割並合併影片片段（無重新編碼，速度快）。
 
@@ -22,13 +48,14 @@ def render_video(source_video, kept_segments, output_path, progress_callback=Non
         kept_segments: 要保留的片段清單 [{'start': 0.0, 'end': 10.0}, ...]
         output_path: 輸出影片路徑
         progress_callback: 可選回呼 callback(step, current, total) 用於 GUI 進度
+        error_callback: 可選回呼 callback(error_msg) 將 FFmpeg 錯誤回傳給 GUI
 
     Returns:
         bool: 成功與否
     """
     logger.info("開始無損裁剪 (Stream Copy)...")
 
-    temp_dir = tempfile.mkdtemp(prefix="auto_process_render_")
+    temp_dir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
     segment_files = []
 
     try:
@@ -60,7 +87,12 @@ def render_video(source_video, kept_segments, output_path, progress_callback=Non
             )
 
             if result.returncode != 0:
-                logger.error(f"切割片段 {i} 失敗: {result.stderr.decode(errors='replace')}")
+                stderr_text = result.stderr.decode(errors='replace')
+                logger.error(f"切割片段 {i} 失敗: {stderr_text}")
+                if error_callback:
+                    # 取 stderr 最後一行作為使用者可讀摘要
+                    summary = stderr_text.strip().split('\n')[-1] if stderr_text.strip() else "未知錯誤"
+                    error_callback(f"片段 {i+1} 切割失敗: {summary}")
                 continue
 
             segment_files.append(seg_filename)
@@ -99,7 +131,11 @@ def render_video(source_video, kept_segments, output_path, progress_callback=Non
         )
 
         if result.returncode != 0:
-            logger.error(f"合併失敗: {result.stderr.decode(errors='replace')}")
+            stderr_text = result.stderr.decode(errors='replace')
+            logger.error(f"合併失敗: {stderr_text}")
+            if error_callback:
+                summary = stderr_text.strip().split('\n')[-1] if stderr_text.strip() else "未知錯誤"
+                error_callback(f"合併失敗: {summary}")
             return False
 
         logger.info(f"裁剪完成: {output_path}")
