@@ -70,7 +70,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AutoProcess',
+    name='AIEdit',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

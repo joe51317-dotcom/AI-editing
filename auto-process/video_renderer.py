@@ -3,6 +3,7 @@
 從 auto-cut-agent/video_renderer.py 簡化而來，作為獨立套件使用。
 """
 import os
+import sys
 import glob
 import subprocess
 import tempfile
@@ -13,6 +14,9 @@ import time
 from ffmpeg_manager import get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
+
+# Windows 下隱藏 FFmpeg console 視窗
+_SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # 暫存目錄前綴，用於啟動時清理殘留
 _TEMP_PREFIX = "auto_process_render_"
@@ -83,7 +87,8 @@ def render_video(source_video, kept_segments, output_path,
             ]
 
             result = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=_SUBPROCESS_FLAGS,
             )
 
             if result.returncode != 0:
@@ -127,7 +132,8 @@ def render_video(source_video, kept_segments, output_path,
         ]
 
         result = subprocess.run(
-            concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_SUBPROCESS_FLAGS,
         )
 
         if result.returncode != 0:

@@ -1,5 +1,5 @@
 ; Inno Setup Script for 課程影片處理工具
-; 產生安裝檔: AutoProcessSetup.exe
+; 產生安裝檔: AIEditSetup.exe
 ;
 ; 使用方式:
 ;   1. 先執行 PyInstaller: pyinstaller build.spec
@@ -7,7 +7,7 @@
 ;   3. 用 Inno Setup 編譯此腳本
 
 #define MyAppName "課程影片處理工具"
-#define MyAppNameEn "AutoProcess"
+#define MyAppNameEn "AIEdit"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Auto-Process"
 #define MyAppExeName "AutoProcess.exe"

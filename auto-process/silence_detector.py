@@ -3,12 +3,16 @@
 偵測影片中的靜音區段，分類為開頭空白、結尾空白、中間休息。
 """
 import re
+import sys
 import subprocess
 import logging
 
 from ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
 
 logger = logging.getLogger(__name__)
+
+# Windows 下隱藏 FFmpeg console 視窗
+_SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def get_video_duration(video_path):
@@ -20,7 +24,8 @@ def get_video_duration(video_path):
         "-of", "default=noprint_wrappers=1:nokey=1",
         video_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                             creationflags=_SUBPROCESS_FLAGS)
     if result.returncode != 0:
         raise RuntimeError(f"FFprobe 失敗: {result.stderr}")
     return float(result.stdout.strip())
@@ -49,7 +54,8 @@ def detect_silence(video_path, noise_db=-30, min_duration=10):
 
     logger.info(f"偵測靜音 (noise={noise_db}dB, min_duration={min_duration}s)...")
     result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                             encoding="utf-8", errors="replace")
+                             encoding="utf-8", errors="replace",
+                             creationflags=_SUBPROCESS_FLAGS)
 
     stderr = result.stderr
     silence_regions = []
@@ -108,7 +114,8 @@ def _extract_rms_windows(video_path, start_time, duration=30,
         "-f", "s16le",
         "pipe:1",
     ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             creationflags=_SUBPROCESS_FLAGS)
 
     if not result.stdout:
         return []
