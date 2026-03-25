@@ -6,6 +6,7 @@ import sys
 import io
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 
 # UTF-8 編碼
 if hasattr(sys.stdout, "buffer"):
@@ -22,6 +23,22 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
+
+# 日誌寫入檔案（RotatingFileHandler）
+_log_dir = os.path.join(os.path.expanduser("~"), ".auto-process-gui")
+os.makedirs(_log_dir, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    os.path.join(_log_dir, "app.log"),
+    maxBytes=5 * 1024 * 1024,  # 5MB
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logging.getLogger().addHandler(_file_handler)
+
 logger = logging.getLogger(__name__)
 
 

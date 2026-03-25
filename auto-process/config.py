@@ -1,10 +1,19 @@
+import sys
 import os
 from dotenv import load_dotenv, find_dotenv
 
-load_dotenv(find_dotenv())
-
-# 專案根目錄（.env 所在位置）
-PROJECT_ROOT = os.path.dirname(os.path.abspath(find_dotenv())) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# PyInstaller 打包後，exe 所在目錄作為基準
+if getattr(sys, "frozen", False):
+    # 打包後: exe 所在目錄
+    _exe_dir = os.path.dirname(sys.executable)
+    _env_file = os.path.join(_exe_dir, ".env")
+    if os.path.exists(_env_file):
+        load_dotenv(_env_file)
+    PROJECT_ROOT = _exe_dir
+else:
+    load_dotenv(find_dotenv())
+    # 專案根目錄（.env 所在位置）
+    PROJECT_ROOT = os.path.dirname(os.path.abspath(find_dotenv())) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _resolve(path):
@@ -32,6 +41,9 @@ PROCESSING_DIR = _resolve(os.getenv("PROCESSING_DIR", "./auto-process/processing
 DONE_DIR = _resolve(os.getenv("DONE_DIR", "./auto-process/done"))
 FAILED_DIR = _resolve(os.getenv("FAILED_DIR", "./auto-process/failed"))
 LOG_DIR = _resolve(os.getenv("LOG_DIR", "./auto-process/logs"))
+
+# --- 應用程式 ---
+APP_VERSION = "1.0.0"
 
 # --- 支援的影片格式 ---
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".mts", ".m4v"}

@@ -1,11 +1,13 @@
 """
-主應用程式視窗 — 整合所有面板，協調事件
+主應用程式視窗 — 兩欄佈局，整合所有面板，協調事件
 """
 import os
+import sys
 import queue
 import logging
 import threading
 import customtkinter as ctk
+from PIL import Image
 
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, WINDOW_SIZE, WINDOW_MIN_SIZE
 from gui.components.video_panel import VideoPanel
@@ -13,8 +15,19 @@ from gui.components.youtube_panel import YouTubePanel
 from gui.components.settings_panel import SettingsPanel
 from gui.components.progress_panel import ProgressPanel
 from gui.components.log_viewer import LogViewer
+from gui.settings_store import load_settings, save_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _get_asset_path(filename):
+    """取得 assets 路徑（相容 PyInstaller frozen 環境）"""
+    if getattr(sys, "frozen", False):
+        base = sys._MEIPASS if hasattr(sys, "_MEIPASS") else os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+        base = os.path.join(base, "..")  # auto-process/
+    return os.path.join(base, "assets", filename)
 
 
 class AutoProcessApp(ctk.CTk):
@@ -24,13 +37,16 @@ class AutoProcessApp(ctk.CTk):
         super().__init__()
 
         # 視窗設定
-        self.title("課程影片處理工具")
+        self.title("鼎愛 課程影片處理工具")
         self.geometry(WINDOW_SIZE)
         self.minsize(*WINDOW_MIN_SIZE)
         self.configure(fg_color=COLORS["bg_dark"])
 
         # 設定深色模式
         ctk.set_appearance_mode("dark")
+
+        # 設定視窗圖示
+        self._set_icon()
 
         # 處理佇列（Worker → GUI）
         self.callback_queue = queue.Queue()
@@ -40,44 +56,129 @@ class AutoProcessApp(ctk.CTk):
         self._build_ui()
         self._setup_logging()
         self._setup_dnd()
+        self._load_settings()
         self._poll_queue()
 
+        # 攔截視窗關閉，儲存設定
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _set_icon(self):
+        """設定視窗圖示"""
+        try:
+            ico_path = _get_asset_path("app.ico")
+            if os.path.exists(ico_path):
+                self.iconbitmap(ico_path)
+        except Exception:
+            pass
+
     def _build_ui(self):
-        """建立 UI 佈局"""
-        # 標題列
-        title_bar = ctk.CTkFrame(self, fg_color="transparent", height=50)
-        title_bar.pack(fill="x", padx=PADDING["section"], pady=(PADDING["inner"], 0))
+        """建立兩欄佈局"""
+        # ── 品牌標題列 ──────────────────────────────────
+        title_bar = ctk.CTkFrame(
+            self,
+            fg_color=COLORS["bg_card"],
+            corner_radius=0,
+            height=52,
+        )
+        title_bar.pack(fill="x", side="top")
         title_bar.pack_propagate(False)
 
+        # 左側：Logo + 公司名 + 工具名
+        brand_frame = ctk.CTkFrame(title_bar, fg_color="transparent")
+        brand_frame.pack(side="left", padx=PADDING["section"], pady=8)
+
+        # Logo 圖片
+        try:
+            logo_path = _get_asset_path("logo.png")
+            if os.path.exists(logo_path):
+                logo_img = Image.open(logo_path)
+                ctk_logo = ctk.CTkImage(logo_img, size=(32, 32))
+                ctk.CTkLabel(
+                    brand_frame,
+                    image=ctk_logo,
+                    text="",
+                ).pack(side="left", padx=(0, 8))
+        except Exception:
+            pass
+
+        # 公司名
         ctk.CTkLabel(
-            title_bar,
-            text="課程影片處理工具",
+            brand_frame,
+            text="鼎愛",
             font=(FONT_FAMILY, FONT_SIZES["title"], "bold"),
             text_color=COLORS["accent"],
-        ).pack(side="left", pady=8)
+        ).pack(side="left")
 
-        # 可捲動主區域
-        self.scroll_frame = ctk.CTkScrollableFrame(
+        # 分隔線
+        ctk.CTkLabel(
+            brand_frame,
+            text=" · ",
+            font=(FONT_FAMILY, FONT_SIZES["heading"]),
+            text_color=COLORS["text_dim"],
+        ).pack(side="left")
+
+        # 工具名
+        ctk.CTkLabel(
+            brand_frame,
+            text="課程影片處理工具",
+            font=(FONT_FAMILY, FONT_SIZES["heading"]),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left")
+
+        # 右側：版本
+        try:
+            from config import APP_VERSION
+            version_text = f"v{APP_VERSION}"
+        except ImportError:
+            version_text = "v1.0"
+        ctk.CTkLabel(
+            title_bar,
+            text=version_text,
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_dim"],
+        ).pack(side="right", padx=PADDING["section"])
+
+        # 標題列底部細線
+        ctk.CTkFrame(
             self,
-            fg_color="transparent",
-        )
-        self.scroll_frame.pack(fill="both", expand=True, padx=PADDING["inner"], pady=PADDING["inner"])
+            fg_color=COLORS["border"],
+            height=1,
+            corner_radius=0,
+        ).pack(fill="x")
 
-        # 影片面板
-        self.video_panel = VideoPanel(self.scroll_frame)
-        self.video_panel.pack(fill="x", pady=(0, PADDING["inner"]))
+        # ── 主體：兩欄 Grid ──────────────────────────────
+        main_frame = ctk.CTkFrame(self, fg_color="transparent")
+        main_frame.pack(fill="both", expand=True, padx=PADDING["inner"], pady=PADDING["inner"])
+        main_frame.grid_columnconfigure(0, weight=1, minsize=220)   # 左欄 ~25%
+        main_frame.grid_columnconfigure(1, weight=3, minsize=600)  # 右欄 ~75%
+        main_frame.grid_rowconfigure(0, weight=1)
+
+        # ── 左欄：影片選擇 ───────────────────────────────
+        left_col = ctk.CTkFrame(main_frame, fg_color="transparent")
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        left_col.grid_rowconfigure(0, weight=1)
+        left_col.grid_columnconfigure(0, weight=1)
+
+        self.video_panel = VideoPanel(left_col)
+        self.video_panel.grid(row=0, column=0, sticky="nsew")
+
+        # ── 右欄：設定 + 狀態 ────────────────────────────
+        right_col = ctk.CTkFrame(main_frame, fg_color="transparent")
+        right_col.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        right_col.grid_columnconfigure(0, weight=1)
 
         # YouTube 面板
-        self.youtube_panel = YouTubePanel(self.scroll_frame)
-        self.youtube_panel.pack(fill="x", pady=(0, PADDING["inner"]))
+        self.youtube_panel = YouTubePanel(right_col)
+        self.youtube_panel.grid(row=0, column=0, sticky="ew", pady=(0, 5))
 
         # 設定面板
-        self.settings_panel = SettingsPanel(self.scroll_frame)
-        self.settings_panel.pack(fill="x", pady=(0, PADDING["inner"]))
+        self.settings_panel = SettingsPanel(right_col)
+        self.settings_panel.grid(row=1, column=0, sticky="ew", pady=(0, 5))
 
-        # 操作按鈕
-        btn_frame = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, PADDING["inner"]))
+        # 操作按鈕列
+        btn_frame = ctk.CTkFrame(right_col, fg_color="transparent")
+        btn_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+        btn_frame.grid_columnconfigure(0, weight=1)
 
         self.start_btn = ctk.CTkButton(
             btn_frame,
@@ -86,7 +187,7 @@ class AutoProcessApp(ctk.CTk):
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["bg_dark"],
-            height=42,
+            height=40,
             corner_radius=8,
             command=self._start_processing,
         )
@@ -99,21 +200,21 @@ class AutoProcessApp(ctk.CTk):
             fg_color=COLORS["bg_hover"],
             hover_color=COLORS["error"],
             text_color=COLORS["text_primary"],
-            height=42,
+            height=40,
             corner_radius=8,
-            width=100,
+            width=90,
             command=self._stop_processing,
             state="disabled",
         )
         self.stop_btn.pack(side="right")
 
         # 進度面板
-        self.progress_panel = ProgressPanel(self.scroll_frame)
-        self.progress_panel.pack(fill="x", pady=(0, PADDING["inner"]))
+        self.progress_panel = ProgressPanel(right_col)
+        self.progress_panel.grid(row=3, column=0, sticky="ew", pady=(0, 5))
 
-        # 日誌面板
-        self.log_viewer = LogViewer(self.scroll_frame)
-        self.log_viewer.pack(fill="x", pady=(0, PADDING["inner"]))
+        # 日誌面板（預設收合）
+        self.log_viewer = LogViewer(right_col)
+        self.log_viewer.grid(row=4, column=0, sticky="ew")
 
     def _setup_logging(self):
         """設定 logging 導向 GUI"""
@@ -207,9 +308,12 @@ class AutoProcessApp(ctk.CTk):
         if trim_mode == "manual":
             segments, errors = self.settings_panel.get_manual_segments()
             if errors:
+                self.settings_panel.show_manual_errors(errors)
                 for err in errors:
                     logger.error(f"時間格式錯誤: {err}")
                 return
+            else:
+                self.settings_panel.show_manual_errors([])
             if not segments:
                 logger.warning("請輸入至少一個時間片段")
                 return
@@ -234,6 +338,8 @@ class AutoProcessApp(ctk.CTk):
             speech_threshold=self.settings_panel.get_speech_threshold(),
             break_threshold=self.settings_panel.get_break_threshold(),
             manual_segments=manual_segments,
+            output_dir=self.youtube_panel.get_output_dir(),
+            upload_enabled=self.youtube_panel.is_upload_enabled(),
             youtube_service=self.youtube_panel.get_youtube_service(),
             privacy_status=self.youtube_panel.get_privacy_status(),
             playlist_id=self.youtube_panel.get_selected_playlist_id(),
@@ -254,4 +360,43 @@ class AutoProcessApp(ctk.CTk):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.current_worker = None
-        logger.info("所有處理完成")
+
+        # 完成通知
+        count = len(self.progress_panel.items)
+        output_dir = self.youtube_panel.get_output_dir()
+        self.progress_panel.show_done(count, output_dir)
+        logger.info(f"所有處理完成（{count} 個影片）")
+
+    # ── 設定持久化 ────────────────────────────────────
+
+    def _load_settings(self):
+        """啟動時載入設定"""
+        settings = load_settings()
+        self.youtube_panel.set_state(settings)
+        self.settings_panel.set_state(settings)
+        self.video_panel.naming_panel.set_state(settings)
+
+        # 恢復視窗大小位置
+        geo = settings.get("window_geometry")
+        if geo:
+            try:
+                self.geometry(geo)
+            except Exception:
+                pass
+
+    def _save_settings(self):
+        """收集各面板狀態並儲存"""
+        settings = {}
+        settings.update(self.youtube_panel.get_state())
+        settings.update(self.settings_panel.get_state())
+        settings.update(self.video_panel.naming_panel.get_state())
+        settings["window_geometry"] = self.geometry()
+        save_settings(settings)
+
+    def _on_close(self):
+        """視窗關閉時儲存設定"""
+        try:
+            self._save_settings()
+        except Exception as e:
+            logger.warning(f"儲存設定失敗: {e}")
+        self.destroy()

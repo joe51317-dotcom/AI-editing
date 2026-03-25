@@ -1,6 +1,8 @@
 """
 進度面板 — 顯示每個影片的處理狀態與進度條
 """
+import os
+import sys
 import customtkinter as ctk
 
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
@@ -87,7 +89,7 @@ class ProgressPanel(ctk.CTkFrame):
         self.list_frame = ctk.CTkScrollableFrame(
             self,
             fg_color="transparent",
-            height=80,
+            height=50,
         )
         self.list_frame.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
 
@@ -99,6 +101,32 @@ class ProgressPanel(ctk.CTkFrame):
             text_color=COLORS["text_dim"],
         )
         self.empty_label.pack(pady=8)
+
+        # 完成通知列（預設隱藏）
+        self.done_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.done_label = ctk.CTkLabel(
+            self.done_frame,
+            text="",
+            font=(FONT_FAMILY, FONT_SIZES["body"], "bold"),
+            text_color=COLORS["success"],
+            anchor="w",
+        )
+        self.done_label.pack(side="left")
+
+        self.open_folder_btn = ctk.CTkButton(
+            self.done_frame,
+            text="開啟資料夾",
+            width=100,
+            height=26,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["bg_dark"],
+            corner_radius=6,
+            command=self._open_output_folder,
+        )
+        self.open_folder_btn.pack(side="right")
+        self._output_dir = None
 
     def add_video(self, filename):
         """加入一個影片到進度清單"""
@@ -113,9 +141,28 @@ class ProgressPanel(ctk.CTkFrame):
     def get_item(self, filename):
         return self.items.get(filename)
 
+    def show_done(self, count, output_dir=None):
+        """顯示完成通知"""
+        self._output_dir = output_dir
+        text = f"  {count} 個影片處理完成"
+        if output_dir:
+            text += f"，儲存在 {output_dir}"
+        self.done_label.configure(text=text)
+        self.done_frame.pack(fill="x", padx=PADDING["section"], pady=(0, PADDING["inner"]))
+        if output_dir:
+            self.open_folder_btn.pack(side="right")
+        else:
+            self.open_folder_btn.pack_forget()
+
+    def _open_output_folder(self):
+        """開啟輸出資料夾"""
+        if self._output_dir and os.path.isdir(self._output_dir):
+            os.startfile(self._output_dir)
+
     def clear(self):
         """清除所有進度"""
         for item in self.items.values():
             item.destroy()
         self.items.clear()
+        self.done_frame.pack_forget()
         self.empty_label.pack(pady=8)

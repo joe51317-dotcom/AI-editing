@@ -90,6 +90,38 @@ def list_playlists(youtube):
     return playlists
 
 
+def create_playlist(youtube, title, privacy_status="unlisted"):
+    """
+    建立新的播放清單。
+
+    Returns:
+        dict: {'id': str, 'title': str} 或 None
+    """
+    try:
+        response = youtube.playlists().insert(
+            part="snippet,status",
+            body={
+                "snippet": {
+                    "title": title,
+                },
+                "status": {
+                    "privacyStatus": privacy_status,
+                },
+            },
+        ).execute()
+
+        result = {
+            "id": response["id"],
+            "title": response["snippet"]["title"],
+        }
+        logger.info(f"已建立播放清單: {result['title']} ({result['id']})")
+        return result
+
+    except HttpError as e:
+        logger.error(f"建立播放清單失敗: {e}")
+        return None
+
+
 def add_to_playlist(youtube, video_id, playlist_id):
     """
     將影片加入播放清單。

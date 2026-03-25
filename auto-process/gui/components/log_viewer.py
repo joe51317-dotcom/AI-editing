@@ -10,17 +10,25 @@ from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
 class TextboxLogHandler(logging.Handler):
     """將 logging 輸出導向 CTkTextbox 的 Handler"""
 
-    def __init__(self, textbox, max_lines=500):
+    def __init__(self, textbox, log_viewer=None, max_lines=500):
         super().__init__()
         self.textbox = textbox
+        self.log_viewer = log_viewer
         self.max_lines = max_lines
 
     def emit(self, record):
         msg = self.format(record) + "\n"
         try:
             self.textbox.after(0, self._append, msg)
+            # ERROR 級別自動展開日誌面板
+            if record.levelno >= logging.ERROR and self.log_viewer:
+                self.textbox.after(0, self._auto_expand)
         except Exception:
             pass
+
+    def _auto_expand(self):
+        if self.log_viewer and self.log_viewer.collapsed:
+            self.log_viewer.toggle()
 
     def _append(self, msg):
         self.textbox.configure(state="normal")
@@ -85,10 +93,13 @@ class LogViewer(ctk.CTkFrame):
         self.textbox.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
 
         # 設定 logging handler
-        self.log_handler = TextboxLogHandler(self.textbox)
+        self.log_handler = TextboxLogHandler(self.textbox, log_viewer=self)
         self.log_handler.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
         )
+
+        # 預設收合，節省垂直空間
+        self.toggle()
 
     def get_handler(self):
         """取得 logging handler，供外部註冊"""

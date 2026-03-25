@@ -1,5 +1,5 @@
 """
-影片選擇面板 — 拖放區域 + 影片清單 + 命名規則
+影片選擇面板 — 拖放區域 + 影片清單 + 友善命名選擇
 """
 import os
 import customtkinter as ctk
@@ -40,7 +40,7 @@ class VideoItem(ctk.CTkFrame):
 
         ctk.CTkLabel(
             title_frame,
-            text="標題:",
+            text="YT 標題:",
             font=(FONT_FAMILY, FONT_SIZES["small"]),
             text_color=COLORS["text_secondary"],
         ).pack(side="left")
@@ -53,7 +53,7 @@ class VideoItem(ctk.CTkFrame):
             fg_color=COLORS["bg_input"],
             border_color=COLORS["border"],
             text_color=COLORS["text_primary"],
-            height=26,
+            height=24,
             corner_radius=4,
         )
         self.title_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
@@ -62,12 +62,12 @@ class VideoItem(ctk.CTkFrame):
         ctk.CTkButton(
             self,
             text="✕",
-            width=30,
-            height=30,
-            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            width=28,
+            height=28,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
             fg_color="transparent",
             hover_color=COLORS["error"],
-            text_color=COLORS["text_secondary"],
+            text_color=COLORS["text_dim"],
             command=self._remove,
         ).pack(side="right", padx=PADDING["small"])
 
@@ -78,16 +78,177 @@ class VideoItem(ctk.CTkFrame):
         return self.title_var.get().strip()
 
 
+class NamingRulePanel(ctk.CTkFrame):
+    """使用者友善的輸出命名選擇"""
+
+    MODES = {
+        "original": ("{filename}", "原始檔名"),
+        "date":     ("{date}_{filename}", "日期 + 檔名"),
+        "custom":   (None, "自訂格式"),
+    }
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self.naming_mode = ctk.StringVar(value="original")
+
+        # 標題
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", pady=(4, 2))
+        ctk.CTkLabel(
+            header,
+            text="輸出命名",
+            font=(FONT_FAMILY, FONT_SIZES["small"], "bold"),
+            text_color=COLORS["text_secondary"],
+            anchor="w",
+        ).pack(side="left")
+
+        # 三個 RadioButton 選項
+        options_frame = ctk.CTkFrame(self, fg_color="transparent")
+        options_frame.pack(fill="x")
+
+        for key, (_, label) in self.MODES.items():
+            ctk.CTkRadioButton(
+                options_frame,
+                text=label,
+                variable=self.naming_mode,
+                value=key,
+                font=(FONT_FAMILY, FONT_SIZES["small"]),
+                text_color=COLORS["text_primary"],
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                border_color=COLORS["border"],
+                command=self._on_mode_change,
+            ).pack(anchor="w", pady=1)
+
+        # 自訂格式輸入框（預設隱藏）
+        self.custom_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.custom_var = ctk.StringVar(value="{filename}")
+        self.custom_entry = ctk.CTkEntry(
+            self.custom_frame,
+            textvariable=self.custom_var,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            placeholder_text="{filename}_{date}_{index}",
+            height=26,
+            corner_radius=4,
+        )
+        self.custom_entry.pack(fill="x")
+
+        # 可點擊的變數標籤列
+        vars_row = ctk.CTkFrame(self.custom_frame, fg_color="transparent")
+        vars_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(
+            vars_row,
+            text="插入：",
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_dim"],
+        ).pack(side="left")
+
+        for label, token in [("檔名", "{filename}"), ("日期", "{date}"), ("編號", "{index}")]:
+            ctk.CTkButton(
+                vars_row,
+                text=label,
+                font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+                fg_color="transparent",
+                hover_color=COLORS["bg_hover"],
+                text_color=COLORS["accent"],
+                width=0,
+                height=20,
+                corner_radius=4,
+                command=lambda v=token: self._insert_var(v),
+            ).pack(side="left", padx=1)
+
+        # 預覽
+        self.preview_label = ctk.CTkLabel(
+            self,
+            text="範例：課程影片-1.mp4",
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_dim"],
+            anchor="w",
+        )
+        self.preview_label.pack(fill="x", pady=(3, 0))
+
+        # 段落提示
+        ctk.CTkLabel(
+            self,
+            text="多段影片自動加上 -1、-2 後綴",
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            text_color=COLORS["text_dim"],
+            anchor="w",
+        ).pack(fill="x", pady=(1, 0))
+
+        self._on_mode_change()
+
+    def _insert_var(self, var_text):
+        """在游標位置插入變數"""
+        try:
+            pos = self.custom_entry.index("insert")
+            current = self.custom_var.get()
+            new_val = current[:pos] + var_text + current[pos:]
+            self.custom_var.set(new_val)
+            self.custom_entry.icursor(pos + len(var_text))
+            self.custom_entry.focus_set()
+        except Exception:
+            # fallback: 直接附加到尾端
+            self.custom_var.set(self.custom_var.get() + var_text)
+        self._update_preview()
+
+    def _on_mode_change(self):
+        mode = self.naming_mode.get()
+        if mode == "custom":
+            self.custom_frame.pack(fill="x", pady=(4, 0))
+        else:
+            self.custom_frame.pack_forget()
+        self._update_preview()
+
+    def _update_preview(self):
+        mode = self.naming_mode.get()
+        if mode == "original":
+            base = "課程影片"
+        elif mode == "date":
+            base = "20260325_課程影片"
+        else:
+            val = self.custom_var.get() or "{filename}"
+            base = val.replace("{filename}", "課程影片").replace("{date}", "20260325").replace("{index}", "1")
+        example = f"{base}-1.mp4"
+        self.preview_label.configure(text=f"範例：{example}")
+
+    def get_naming_rule(self):
+        mode = self.naming_mode.get()
+        if mode == "custom":
+            return self.custom_var.get() or "{filename}"
+        return self.MODES[mode][0]
+
+    def get_state(self):
+        """取得命名規則狀態"""
+        return {
+            "naming_mode": self.naming_mode.get(),
+            "custom_naming": self.custom_var.get(),
+        }
+
+    def set_state(self, state):
+        """恢復命名規則狀態"""
+        if "naming_mode" in state:
+            mode = state["naming_mode"]
+            if mode in self.MODES:
+                self.naming_mode.set(mode)
+        if "custom_naming" in state:
+            self.custom_var.set(state["custom_naming"])
+        self._on_mode_change()
+
+
 class VideoPanel(ctk.CTkFrame):
-    """影片選擇與管理面板"""
+    """影片選擇與管理面板（填滿左欄高度）"""
 
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color=COLORS["bg_card"], corner_radius=CORNER_RADIUS, **kwargs)
         self.video_items = []
 
-        # 標題
+        # 標題列
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=PADDING["section"], pady=(PADDING["inner"], 0))
+        header.pack(fill="x", padx=PADDING["section"], pady=(PADDING["inner"], 4))
 
         ctk.CTkLabel(
             header,
@@ -98,9 +259,9 @@ class VideoPanel(ctk.CTkFrame):
 
         ctk.CTkButton(
             header,
-            text="瀏覽檔案",
-            width=90,
-            height=28,
+            text="+ 瀏覽檔案",
+            width=100,
+            height=26,
             font=(FONT_FAMILY, FONT_SIZES["small"]),
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
@@ -109,6 +270,20 @@ class VideoPanel(ctk.CTkFrame):
             command=self._browse_files,
         ).pack(side="right")
 
+        self.clear_all_btn = ctk.CTkButton(
+            header,
+            text="清除全部",
+            width=80,
+            height=26,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            fg_color="transparent",
+            hover_color=COLORS["error"],
+            text_color=COLORS["text_secondary"],
+            corner_radius=6,
+            command=self.clear_all,
+        )
+        self.clear_all_btn.pack(side="right", padx=(0, 6))
+
         # 拖放區域
         self.drop_area = ctk.CTkFrame(
             self,
@@ -116,9 +291,9 @@ class VideoPanel(ctk.CTkFrame):
             border_color=COLORS["border"],
             border_width=2,
             corner_radius=CORNER_RADIUS,
-            height=80,
+            height=64,
         )
-        self.drop_area.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
+        self.drop_area.pack(fill="x", padx=PADDING["section"], pady=(0, 4))
         self.drop_area.pack_propagate(False)
 
         self.drop_label = ctk.CTkLabel(
@@ -129,44 +304,21 @@ class VideoPanel(ctk.CTkFrame):
         )
         self.drop_label.place(relx=0.5, rely=0.5, anchor="center")
 
-        # 影片清單（可捲動）
+        # 影片清單（填滿剩餘空間）
         self.list_frame = ctk.CTkScrollableFrame(
             self,
             fg_color="transparent",
-            height=0,
         )
-        self.list_frame.pack(fill="x", padx=PADDING["section"], pady=(0, PADDING["inner"]))
+        self.list_frame.pack(fill="both", expand=True, padx=PADDING["section"])
 
-        # 命名規則
-        naming_frame = ctk.CTkFrame(self, fg_color="transparent")
-        naming_frame.pack(fill="x", padx=PADDING["section"], pady=(0, PADDING["inner"]))
+        # 分隔線
+        ctk.CTkFrame(self, fg_color=COLORS["border_subtle"], height=1, corner_radius=0).pack(
+            fill="x", padx=PADDING["section"], pady=(4, 0)
+        )
 
-        ctk.CTkLabel(
-            naming_frame,
-            text="命名規則:",
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left")
-
-        self.naming_var = ctk.StringVar(value="{filename}")
-        ctk.CTkEntry(
-            naming_frame,
-            textvariable=self.naming_var,
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_input"],
-            border_color=COLORS["border"],
-            text_color=COLORS["text_primary"],
-            width=200,
-            height=26,
-            corner_radius=4,
-        ).pack(side="left", padx=(4, 8))
-
-        ctk.CTkLabel(
-            naming_frame,
-            text="可用: {filename} {date} {index} {part}",
-            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
-            text_color=COLORS["text_dim"],
-        ).pack(side="left")
+        # 命名規則（底部固定）
+        self.naming_panel = NamingRulePanel(self)
+        self.naming_panel.pack(fill="x", padx=PADDING["section"], pady=(6, PADDING["inner"]))
 
     def setup_dnd(self, root):
         """設定拖放功能（需要 tkinterdnd2）"""
@@ -176,11 +328,9 @@ class VideoPanel(ctk.CTkFrame):
             self.drop_area.dnd_bind("<<DragEnter>>", self._on_drag_enter)
             self.drop_area.dnd_bind("<<DragLeave>>", self._on_drag_leave)
         except Exception:
-            # tkinterdnd2 不可用時靜默略過
             pass
 
     def _on_drop(self, event):
-        """處理拖放事件"""
         self.drop_area.configure(border_color=COLORS["border"])
         files = self._parse_drop_data(event.data)
         for f in files:
@@ -193,9 +343,7 @@ class VideoPanel(ctk.CTkFrame):
         self.drop_area.configure(border_color=COLORS["border"])
 
     def _parse_drop_data(self, data):
-        """解析拖放資料（處理 Windows 的大括號路徑格式）"""
         files = []
-        # Windows 拖放可能用大括號包裹含空格路徑
         if "{" in data:
             import re
             files = re.findall(r"\{([^}]+)\}", data)
@@ -207,7 +355,6 @@ class VideoPanel(ctk.CTkFrame):
         return [f for f in files if os.path.isfile(f)]
 
     def _browse_files(self):
-        """開啟檔案選擇對話框"""
         filetypes = [
             ("影片檔案", " ".join(f"*{ext}" for ext in VIDEO_EXTENSIONS)),
             ("所有檔案", "*.*"),
@@ -217,50 +364,38 @@ class VideoPanel(ctk.CTkFrame):
             self.add_video(p)
 
     def add_video(self, video_path):
-        """加入影片到清單"""
         ext = os.path.splitext(video_path)[1].lower()
         if ext not in VIDEO_EXTENSIONS:
             return
-
-        # 避免重複
         for item in self.video_items:
             if item.video_path == video_path:
                 return
-
-        item = VideoItem(
-            self.list_frame,
-            video_path,
-            on_remove=self._remove_video,
-        )
+        item = VideoItem(self.list_frame, video_path, on_remove=self._remove_video)
         item.pack(fill="x", pady=2)
         self.video_items.append(item)
         self._update_drop_label()
 
     def _remove_video(self, item):
-        """從清單移除影片"""
         item.pack_forget()
         item.destroy()
         self.video_items.remove(item)
         self._update_drop_label()
 
     def _update_drop_label(self):
-        """更新拖放區文字"""
         if self.video_items:
             self.drop_label.configure(text=f"已加入 {len(self.video_items)} 個影片（可繼續拖放）")
         else:
             self.drop_label.configure(text="拖放影片檔案到此處")
 
     def get_videos(self):
-        """取得所有影片路徑與標題"""
         return [
             {"path": item.video_path, "title": item.get_title()}
             for item in self.video_items
         ]
 
     def get_naming_rule(self):
-        return self.naming_var.get()
+        return self.naming_panel.get_naming_rule()
 
     def clear_all(self):
-        """清空所有影片"""
         for item in list(self.video_items):
             self._remove_video(item)

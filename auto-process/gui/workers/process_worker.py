@@ -1,18 +1,24 @@
 """
-處理 Worker — 背景線程執行裁剪 + 上傳流程
+處理 Worker — 背景線程執行裁剪 + 儲存 + 上傳流程
 """
 import os
 import re
+import shutil
 import logging
 import threading
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# 進度區間常數
+TRIM_PROGRESS_END = 0.4      # 裁剪佔 0% ~ 40%
+UPLOAD_PROGRESS_START = 0.4   # 上傳佔 40% ~ 100%
+UPLOAD_PROGRESS_RANGE = 0.6   # 上傳進度區間寬度
+
 
 class ProcessWorker(threading.Thread):
     """
-    背景處理線程：逐一處理影片（裁剪 → 上傳 → 播放清單 → 縮圖）。
+    背景處理線程：逐一處理影片（裁剪 → 儲存到輸出目錄 → 上傳 → 播放清單 → 縮圖）。
     透過 callback_queue 向 GUI 回報進度。
     """
 
@@ -20,6 +26,7 @@ class ProcessWorker(threading.Thread):
                  trim_enabled=True,
                  speech_threshold=-20, break_threshold=300,
                  manual_segments=None,
+                 output_dir=None, upload_enabled=True,
                  youtube_service=None, privacy_status="unlisted",
                  playlist_id=None, thumbnail_path=None,
                  naming_rule="{filename}"):
@@ -31,6 +38,8 @@ class ProcessWorker(threading.Thread):
         self.manual_segments = manual_segments  # list[list[dict]] or None
         self.speech_threshold = speech_threshold
         self.break_threshold = break_threshold
+        self.output_dir = output_dir
+        self.upload_enabled = upload_enabled
         self.youtube_service = youtube_service
         self.privacy_status = privacy_status
         self.playlist_id = playlist_id
@@ -75,13 +84,13 @@ class ProcessWorker(threading.Thread):
             output_path = f"{base}-{part_num}{ext}"
 
             self._send(filename, "progress",
-                       value=(i / total_parts) * 0.4,
+                       value=(i / total_parts) * TRIM_PROGRESS_END,
                        text=f"裁剪 Part {part_num}/{total_parts}...")
 
             def make_cb(part_idx):
                 def cb(step, current, total):
-                    part_base = (part_idx / total_parts) * 0.4
-                    part_range = 0.4 / total_parts
+                    part_base = (part_idx / total_parts) * TRIM_PROGRESS_END
+                    part_range = TRIM_PROGRESS_END / total_parts
                     sub_pct = (current / total * 0.8) if step == "cutting" else 0.9
                     self._send(filename, "progress",
                                value=part_base + sub_pct * part_range)
@@ -97,10 +106,10 @@ class ProcessWorker(threading.Thread):
                 logger.error(f"  手動裁剪 Part {part_num} 失敗")
 
         if output_paths:
-            self._send(filename, "progress", value=0.4,
+            self._send(filename, "progress", value=TRIM_PROGRESS_END,
                        text=f"手動裁剪完成，{len(output_paths)} 個檔案")
         else:
-            self._send(filename, "progress", value=0.4, text="手動裁剪失敗")
+            self._send(filename, "progress", value=TRIM_PROGRESS_END, text="手動裁剪失敗")
 
         return output_paths or [video_path]
 
@@ -136,7 +145,7 @@ class ProcessWorker(threading.Thread):
             self._send(filename, "progress", value=0.0)
 
             def trim_progress(pct, detail):
-                overall = pct * 0.4
+                overall = pct * TRIM_PROGRESS_END
                 self._send(filename, "progress", value=overall, text=detail)
 
             from course_trimmer import trim_course_video
@@ -149,22 +158,42 @@ class ProcessWorker(threading.Thread):
 
             if trimmed:
                 trimmed_files = trimmed
-                self._send(filename, "progress", value=0.4, text=f"裁剪完成，{len(trimmed)} 個檔案")
+                self._send(filename, "progress", value=TRIM_PROGRESS_END, text=f"裁剪完成，{len(trimmed)} 個檔案")
             else:
                 trimmed_files = [video_path]
-                self._send(filename, "progress", value=0.4, text="不需裁剪，使用原始檔")
+                self._send(filename, "progress", value=TRIM_PROGRESS_END, text="不需裁剪，使用原始檔")
         else:
             # --- 跳過裁剪 ---
             trimmed_files = [video_path]
-            self._send(filename, "progress", value=0.4, text="跳過裁剪")
+            self._send(filename, "progress", value=TRIM_PROGRESS_END, text="跳過裁剪")
 
         if self._stopped():
             return
 
-        # === Step 2: 上傳到 YouTube ===
-        if not self.youtube_service:
+        # === Step 2: 複製到輸出目錄 ===
+        if self.output_dir:
+            self._send(filename, "status", text="儲存到輸出目錄...")
+            saved_files = []
+            for fp in trimmed_files:
+                dest = os.path.join(self.output_dir, os.path.basename(fp))
+                # 避免來源與目的相同
+                if os.path.abspath(fp) != os.path.abspath(dest):
+                    shutil.copy2(fp, dest)
+                    logger.info(f"已儲存: {dest}")
+                saved_files.append(dest)
+            trimmed_files = saved_files
+
+        if self._stopped():
+            return
+
+        # === Step 3: 上傳到 YouTube（可選） ===
+        if not self.upload_enabled or not self.youtube_service:
+            self._send(filename, "progress", value=1.0)
             self._send(filename, "done")
-            logger.info(f"{filename}: 裁剪完成（未登入 YouTube，跳過上傳）")
+            if not self.upload_enabled:
+                logger.info(f"{filename}: 處理完成（僅本地儲存）")
+            else:
+                logger.info(f"{filename}: 裁剪完成（未登入 YouTube，跳過上傳）")
             return
 
         total_files = len(trimmed_files)
@@ -175,13 +204,12 @@ class ProcessWorker(threading.Thread):
             # 計算標題
             part_title = self._apply_naming_rule(video_title, index, part_idx)
             if total_files > 1:
-                # 多段影片加上 Part 編號（如果命名規則沒有 {part}）
-                if "{part}" not in self.naming_rule:
-                    part_title = f"{part_title} Part {part_idx}"
+                # 多段影片加上 -N 後綴
+                part_title = f"{part_title}-{part_idx}"
 
-            # 計算上傳進度映射（0.4 ~ 1.0 分配給上傳）
-            upload_base = 0.4 + (0.6 * (part_idx - 1) / total_files)
-            upload_range = 0.6 / total_files
+            # 計算上傳進度映射
+            upload_base = UPLOAD_PROGRESS_START + (UPLOAD_PROGRESS_RANGE * (part_idx - 1) / total_files)
+            upload_range = UPLOAD_PROGRESS_RANGE / total_files
 
             self._send(filename, "status", text=f"上傳中 ({part_idx}/{total_files})...")
 
@@ -203,7 +231,7 @@ class ProcessWorker(threading.Thread):
 
             logger.info(f"已上傳: {part_title} → https://youtu.be/{video_id}")
 
-            # === Step 3: 設定縮圖 ===
+            # === Step 4: 設定縮圖 ===
             if self.thumbnail_path:
                 try:
                     from youtube_api import set_thumbnail
@@ -211,7 +239,7 @@ class ProcessWorker(threading.Thread):
                 except Exception as e:
                     logger.warning(f"設定縮圖失敗: {e}")
 
-            # === Step 4: 加入播放清單 ===
+            # === Step 5: 加入播放清單 ===
             if self.playlist_id:
                 try:
                     from youtube_api import add_to_playlist
