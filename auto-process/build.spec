@@ -10,6 +10,14 @@ block_cipher = None
 # customtkinter 資源路徑
 ctk_path = os.path.dirname(customtkinter.__file__)
 
+# tkinterdnd2 DLL 路徑（拖放支援）
+try:
+    import tkinterdnd2
+    dnd_path = os.path.dirname(tkinterdnd2.__file__)
+    dnd_data = [(dnd_path, 'tkinterdnd2')]
+except ImportError:
+    dnd_data = []
+
 a = Analysis(
     ['main_gui.py'],
     pathex=[],
@@ -19,16 +27,29 @@ a = Analysis(
         (ctk_path, 'customtkinter'),
         # .env 範本
         ('../.env.example', '.'),
-    ],
+        # 鼎愛品牌資源
+        ('assets', 'assets'),
+    ] + dnd_data,
     hiddenimports=[
         'customtkinter',
         'PIL',
         'PIL._tkinter_finder',
+        # Google API
         'google_auth_oauthlib',
         'googleapiclient',
         'googleapiclient.discovery',
         'google.auth.transport.requests',
         'google.oauth2.credentials',
+        # keyring（安全存放 YouTube token）
+        'keyring',
+        'keyring.backends',
+        'keyring.backends.Windows',
+        'jaraco.classes',
+        'jaraco.functools',
+        'jaraco.context',
+        'backports.tarfile',
+        # 拖放支援
+        'tkinterdnd2',
     ],
     hookspath=[],
     hooksconfig={},
@@ -45,29 +66,20 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='AutoProcess',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # 無 console 視窗
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='app_icon.ico',  # 取消註解以設定圖示
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='AutoProcess',
+    icon='assets/app.ico',
 )

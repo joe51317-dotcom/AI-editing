@@ -58,6 +58,7 @@ class AutoProcessApp(ctk.CTk):
         self._setup_dnd()
         self._load_settings()
         self._poll_queue()
+        self._check_ffmpeg_on_startup()
 
         # 攔截視窗關閉，儲存設定
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -366,6 +367,39 @@ class AutoProcessApp(ctk.CTk):
         output_dir = self.youtube_panel.get_output_dir()
         self.progress_panel.show_done(count, output_dir)
         logger.info(f"所有處理完成（{count} 個影片）")
+
+    # ── FFmpeg 自動偵測 ────────────────────────────────
+
+    def _check_ffmpeg_on_startup(self):
+        """啟動時背景檢查 FFmpeg，缺少則自動下載"""
+        from ffmpeg_manager import check_ffmpeg
+        if check_ffmpeg():
+            logger.info("FFmpeg 已就緒")
+            return
+
+        logger.info("FFmpeg 未偵測到，開始自動下載...")
+        self.progress_panel.add_video("__ffmpeg__").set_status("正在下載 FFmpeg...")
+
+        def _download():
+            from ffmpeg_manager import download_ffmpeg
+            success = download_ffmpeg(
+                progress_callback=lambda dl, total: self.callback_queue.put({
+                    "type": "progress",
+                    "filename": "__ffmpeg__",
+                    "value": dl / total if total > 0 else 0,
+                    "text": f"下載 FFmpeg... {dl // (1024*1024)}MB / {total // (1024*1024)}MB",
+                })
+            )
+            if success:
+                self.callback_queue.put({"type": "done", "filename": "__ffmpeg__"})
+                logger.info("FFmpeg 下載完成")
+            else:
+                self.callback_queue.put({
+                    "type": "error", "filename": "__ffmpeg__",
+                    "text": "FFmpeg 下載失敗，請手動安裝",
+                })
+
+        threading.Thread(target=_download, daemon=True).start()
 
     # ── 設定持久化 ────────────────────────────────────
 
