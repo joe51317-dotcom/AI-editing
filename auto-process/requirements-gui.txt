@@ -13,6 +13,9 @@ colorama
 customtkinter>=5.2.0
 Pillow>=10.0.0
 
+# 安全存放 YouTube Token（Windows Credential Manager / macOS Keychain）
+keyring>=25.0.0
+
 # 拖放支援（可選，沒有的話改用瀏覽按鈕）
 tkinterdnd2>=0.3.0
 

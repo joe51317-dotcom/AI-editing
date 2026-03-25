@@ -40,20 +40,100 @@ RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnecte
                         http.client.ResponseNotReady, http.client.BadStatusLine)
 
 
+_KEYRING_SERVICE = "auto-process-gui"
+_KEYRING_ACCOUNT = "youtube-oauth-token"
+
+
+def _keyring_available():
+    """檢查 keyring 是否可用"""
+    try:
+        import keyring
+        # 測試能否正常使用（部分 Linux 無 GUI 環境會失敗）
+        keyring.get_credential(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        return True
+    except Exception:
+        return False
+
+
+def _load_token_from_keyring():
+    """從 keyring 載入 token JSON"""
+    try:
+        import keyring
+        data = keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+        if data:
+            return Credentials.from_authorized_user_info(
+                __import__("json").loads(data), SCOPES
+            )
+    except Exception:
+        pass
+    return None
+
+
+def _save_token_to_keyring(creds):
+    """將 token JSON 存入 keyring"""
+    try:
+        import keyring
+        keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT, creds.to_json())
+        return True
+    except Exception:
+        return False
+
+
+def _delete_token_from_keyring():
+    """從 keyring 刪除 token"""
+    try:
+        import keyring
+        keyring.delete_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
+    except Exception:
+        pass
+
+
+def _migrate_token_to_keyring(token_path):
+    """
+    遷移：如果明文 token.json 存在且 keyring 可用，
+    搬到 keyring 並刪除明文檔。
+    """
+    if not os.path.exists(token_path):
+        return
+    if not _keyring_available():
+        return
+    try:
+        with open(token_path, "r", encoding="utf-8") as f:
+            token_json = f.read()
+        import keyring
+        keyring.set_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT, token_json)
+        os.remove(token_path)
+        logger.info("已將 YouTube token 從明文檔遷移到系統認證管理員")
+    except Exception as e:
+        logger.debug(f"Token 遷移失敗（繼續使用檔案）: {e}")
+
+
 def get_credentials(client_secret_path, token_path):
     """
     取得 OAuth2 憑證。如果 token 過期會自動 refresh。
+    優先使用 keyring（Windows Credential Manager），
+    不可用時降級為明文 token.json。
 
     Args:
         client_secret_path: client_secret.json 路徑
-        token_path: token.json 儲存路徑
+        token_path: token.json 儲存路徑（降級用）
 
     Returns:
         google.oauth2.credentials.Credentials
     """
     creds = None
+    use_keyring = _keyring_available()
 
-    if os.path.exists(token_path):
+    # 自動遷移：明文 → keyring
+    if use_keyring:
+        _migrate_token_to_keyring(token_path)
+
+    # 1. 嘗試從 keyring 載入
+    if use_keyring:
+        creds = _load_token_from_keyring()
+
+    # 2. 降級：從明文檔載入
+    if not creds and os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
     # 檢查 scope 是否匹配（舊 token 可能只有 youtube.upload）
@@ -68,7 +148,7 @@ def get_credentials(client_secret_path, token_path):
         logger.info("Token 已過期，自動更新中...")
         try:
             creds.refresh(Request())
-            _save_token(creds, token_path)
+            _save_token(creds, token_path, use_keyring)
         except Exception:
             logger.info("Token refresh 失敗，重新認證...")
             creds = None
@@ -84,14 +164,27 @@ def get_credentials(client_secret_path, token_path):
 
         flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, SCOPES)
         creds = flow.run_local_server(port=0)
-        _save_token(creds, token_path)
+        _save_token(creds, token_path, use_keyring)
         logger.info("認證成功！Token 已儲存。")
 
     return creds
 
 
-def _save_token(creds, token_path):
-    """儲存 token 到檔案"""
+def _save_token(creds, token_path, use_keyring=None):
+    """儲存 token（優先 keyring，降級檔案）"""
+    if use_keyring is None:
+        use_keyring = _keyring_available()
+
+    if use_keyring and _save_token_to_keyring(creds):
+        # keyring 成功，刪除明文檔（如果存在）
+        if os.path.exists(token_path):
+            try:
+                os.remove(token_path)
+            except OSError:
+                pass
+        return
+
+    # 降級：寫入明文檔
     os.makedirs(os.path.dirname(token_path), exist_ok=True)
     with open(token_path, "w", encoding="utf-8") as f:
         f.write(creds.to_json())

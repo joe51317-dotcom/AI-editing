@@ -136,17 +136,23 @@ class SearchablePlaylistPicker(ctk.CTkFrame):
             self._click_bind_id = None
 
     def _on_global_click(self, event):
-        """點擊下拉面板外部時關閉"""
-        widget = event.widget
-        # 檢查點擊是否在下拉面板內
+        """點擊下拉面板外部時關閉（用座標碰撞檢測，避免 scrollbar 誤判）"""
         try:
-            if widget == self.dropdown_frame or widget == self.search_entry:
+            # 取得 dropdown_frame 在螢幕上的邊界框
+            x = self.dropdown_frame.winfo_rootx()
+            y = self.dropdown_frame.winfo_rooty()
+            w = self.dropdown_frame.winfo_width()
+            h = self.dropdown_frame.winfo_height()
+            # 點擊座標落在 dropdown 內部，不關閉
+            if x <= event.x_root <= x + w and y <= event.y_root <= y + h:
                 return
-            parent = widget
-            while parent:
-                if parent == self.dropdown_frame or parent == self.list_frame:
-                    return
-                parent = getattr(parent, "master", None)
+            # 也檢查 display_btn（點擊按鈕本身由 _toggle_dropdown 處理）
+            bx = self.display_btn.winfo_rootx()
+            by = self.display_btn.winfo_rooty()
+            bw = self.display_btn.winfo_width()
+            bh = self.display_btn.winfo_height()
+            if bx <= event.x_root <= bx + bw and by <= event.y_root <= by + bh:
+                return
         except Exception:
             pass
         self._hide_dropdown()
@@ -555,7 +561,12 @@ class YouTubePanel(ctk.CTkFrame):
         self.login_btn.configure(text="登入 YouTube", command=self._login)
         self.playlist_picker.reset()
 
-        # 刪除 token.json，讓下次登入時重新授權
+        # 清除 token（keyring + 明文檔），確保下次登入重新授權
+        try:
+            from youtube_uploader import _delete_token_from_keyring
+            _delete_token_from_keyring()
+        except Exception:
+            pass
         try:
             from config import YOUTUBE_TOKEN_PATH
             if os.path.exists(YOUTUBE_TOKEN_PATH):
