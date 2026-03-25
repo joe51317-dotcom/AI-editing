@@ -3,6 +3,7 @@
 """
 import os
 import sys
+import time
 import customtkinter as ctk
 
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
@@ -76,14 +77,27 @@ class ProgressPanel(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color=COLORS["bg_card"], corner_radius=CORNER_RADIUS, **kwargs)
         self.items = {}
+        self._timer_start = None
+        self._timer_after_id = None
 
-        # 標題
+        # 標題列：進度 + 計時器
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=PADDING["section"], pady=(PADDING["inner"], 0))
+
         ctk.CTkLabel(
-            self,
+            header,
             text="進度",
             font=(FONT_FAMILY, FONT_SIZES["heading"], "bold"),
             text_color=COLORS["text_primary"],
-        ).pack(anchor="w", padx=PADDING["section"], pady=(PADDING["inner"], 0))
+        ).pack(side="left")
+
+        self.timer_label = ctk.CTkLabel(
+            header,
+            text="",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            text_color=COLORS["text_dim"],
+        )
+        self.timer_label.pack(side="right")
 
         # 進度清單（限制最大高度，避免擠壓日誌面板）
         self.list_frame = ctk.CTkScrollableFrame(
@@ -160,8 +174,32 @@ class ProgressPanel(ctk.CTkFrame):
         if self._output_dir and os.path.isdir(self._output_dir):
             os.startfile(self._output_dir)
 
+    def start_timer(self):
+        """開始計時"""
+        self._timer_start = time.time()
+        self.timer_label.configure(text="00:00")
+        self._tick_timer()
+
+    def stop_timer(self):
+        """停止計時（保留最終時間顯示）"""
+        if self._timer_after_id:
+            self.after_cancel(self._timer_after_id)
+            self._timer_after_id = None
+
+    def _tick_timer(self):
+        """每秒更新計時器"""
+        if self._timer_start is None:
+            return
+        elapsed = int(time.time() - self._timer_start)
+        mins, secs = divmod(elapsed, 60)
+        self.timer_label.configure(text=f"{mins:02d}:{secs:02d}")
+        self._timer_after_id = self.after(1000, self._tick_timer)
+
     def clear(self):
         """清除所有進度"""
+        self.stop_timer()
+        self._timer_start = None
+        self.timer_label.configure(text="")
         for item in self.items.values():
             item.destroy()
         self.items.clear()

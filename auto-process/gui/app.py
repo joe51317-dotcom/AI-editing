@@ -325,6 +325,7 @@ class AutoProcessApp(ctk.CTk):
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.progress_panel.clear()
+        self.progress_panel.start_timer()
 
         # 為每個影片建立進度項目
         for v in videos:
@@ -362,6 +363,7 @@ class AutoProcessApp(ctk.CTk):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.current_worker = None
+        self.progress_panel.stop_timer()
 
         # 完成通知
         count = len(self.progress_panel.items)
