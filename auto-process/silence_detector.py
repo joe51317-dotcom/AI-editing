@@ -31,7 +31,16 @@ def get_video_duration(video_path):
     return float(result.stdout.strip())
 
 
-def detect_silence(video_path, noise_db=-30, min_duration=10):
+def _parse_ffmpeg_time(line):
+    """從 FFmpeg stderr 行解析 time= 的秒數"""
+    m = re.search(r"time=(\d+):(\d+):(\d+\.?\d*)", line)
+    if m:
+        return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    return None
+
+
+def detect_silence(video_path, noise_db=-30, min_duration=10,
+                   total_duration=None, progress_callback=None):
     """
     用 FFmpeg silencedetect 偵測所有靜音區段。
 
@@ -39,6 +48,8 @@ def detect_silence(video_path, noise_db=-30, min_duration=10):
         video_path: 影片路徑
         noise_db: 靜音判定分貝閾值（預設 -30dB）
         min_duration: 最短靜音持續秒數（預設 10 秒）
+        total_duration: 影片總長度（秒），用於計算進度百分比
+        progress_callback: 可選回呼 callback(pct, text)
 
     Returns:
         list[dict]: 靜音區段清單 [{'start': float, 'end': float, 'duration': float}, ...]
@@ -53,11 +64,30 @@ def detect_silence(video_path, noise_db=-30, min_duration=10):
     ]
 
     logger.info(f"偵測靜音 (noise={noise_db}dB, min_duration={min_duration}s)...")
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                             encoding="utf-8", errors="replace",
-                             creationflags=_SUBPROCESS_FLAGS)
 
-    stderr = result.stderr
+    # 用 Popen 即時讀取 stderr 以回報進度
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=_SUBPROCESS_FLAGS,
+    )
+
+    stderr_lines = []
+    last_report = 0
+    for raw_line in proc.stderr:
+        line = raw_line.decode("utf-8", errors="replace")
+        stderr_lines.append(line)
+
+        if progress_callback and total_duration and total_duration > 0:
+            t = _parse_ffmpeg_time(line)
+            if t is not None and t - last_report >= 2:  # 每 2 秒更新一次
+                last_report = t
+                pct = min(t / total_duration, 0.99)
+                mins = int(t) // 60
+                secs = int(t) % 60
+                progress_callback(pct, f"偵測靜音中... {mins}:{secs:02d} / {int(total_duration)//60}:{int(total_duration)%60:02d}")
+
+    proc.wait()
+    stderr = "".join(stderr_lines)
     silence_regions = []
 
     # 解析 silence_start
@@ -344,10 +374,22 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
         list[list[dict]]: 每個 part 是一組 [{'start': float, 'end': float}, ...]
     """
     if progress_callback:
-        progress_callback(0.0, "取得影片資訊...")
+        progress_callback(0.0, "取得影片長度...")
 
     total_duration = get_video_duration(video_path)
-    silence_regions = detect_silence(video_path, noise_db=speech_threshold_db, min_duration=min_duration)
+
+    if progress_callback:
+        progress_callback(0.02, "偵測靜音中...")
+
+    def silence_progress(pct, text):
+        # 靜音偵測佔 0.02 ~ 0.30 的進度
+        if progress_callback:
+            progress_callback(0.02 + pct * 0.28, text)
+
+    silence_regions = detect_silence(
+        video_path, noise_db=speech_threshold_db, min_duration=min_duration,
+        total_duration=total_duration, progress_callback=silence_progress,
+    )
 
     if progress_callback:
         progress_callback(0.3, f"偵測到 {len(silence_regions)} 段靜音，分析中...")

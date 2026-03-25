@@ -86,11 +86,11 @@ class LogViewer(ctk.CTkFrame):
             border_color=COLORS["border"],
             border_width=1,
             corner_radius=4,
-            height=120,
+            height=100,
             state="disabled",
             wrap="word",
         )
-        self.textbox.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
+        self.textbox.pack(fill="both", expand=True, padx=PADDING["section"], pady=PADDING["inner"])
 
         # 設定 logging handler
         self.log_handler = TextboxLogHandler(self.textbox, log_viewer=self)
@@ -98,8 +98,8 @@ class LogViewer(ctk.CTkFrame):
             logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
         )
 
-        # 預設收合，節省垂直空間
-        self.toggle()
+        # 預設展開，讓使用者能看到處理進度
+        # （日誌面板位於最底部，會填滿剩餘空間）
 
     def get_handler(self):
         """取得 logging handler，供外部註冊"""
@@ -112,7 +112,7 @@ class LogViewer(ctk.CTkFrame):
             self.textbox.pack_forget()
             self.toggle_label.configure(text="▶ 日誌")
         else:
-            self.textbox.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
+            self.textbox.pack(fill="both", expand=True, padx=PADDING["section"], pady=PADDING["inner"])
             self.toggle_label.configure(text="▼ 日誌")
 
     def clear(self):

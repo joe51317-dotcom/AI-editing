@@ -167,6 +167,7 @@ class AutoProcessApp(ctk.CTk):
         right_col = ctk.CTkFrame(main_frame, fg_color="transparent")
         right_col.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         right_col.grid_columnconfigure(0, weight=1)
+        right_col.grid_rowconfigure(4, weight=1)  # 日誌面板可擴展
 
         # YouTube 面板
         self.youtube_panel = YouTubePanel(right_col)
@@ -213,9 +214,9 @@ class AutoProcessApp(ctk.CTk):
         self.progress_panel = ProgressPanel(right_col)
         self.progress_panel.grid(row=3, column=0, sticky="ew", pady=(0, 5))
 
-        # 日誌面板（預設收合）
+        # 日誌面板（預設收合，展開時填滿剩餘空間）
         self.log_viewer = LogViewer(right_col)
-        self.log_viewer.grid(row=4, column=0, sticky="ew")
+        self.log_viewer.grid(row=4, column=0, sticky="nsew")
 
     def _setup_logging(self):
         """設定 logging 導向 GUI"""

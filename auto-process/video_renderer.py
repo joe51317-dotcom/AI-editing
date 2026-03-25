@@ -3,6 +3,7 @@
 從 auto-cut-agent/video_renderer.py 簡化而來，作為獨立套件使用。
 """
 import os
+import re
 import sys
 import glob
 import subprocess

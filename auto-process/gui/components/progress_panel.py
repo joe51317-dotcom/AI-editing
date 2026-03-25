@@ -85,13 +85,14 @@ class ProgressPanel(ctk.CTkFrame):
             text_color=COLORS["text_primary"],
         ).pack(anchor="w", padx=PADDING["section"], pady=(PADDING["inner"], 0))
 
-        # 進度清單
+        # 進度清單（限制最大高度，避免擠壓日誌面板）
         self.list_frame = ctk.CTkScrollableFrame(
             self,
             fg_color="transparent",
-            height=50,
+            height=60,
         )
         self.list_frame.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
+        self.list_frame.configure(height=60)  # 最大高度約 1-2 個影片
 
         # 空白提示
         self.empty_label = ctk.CTkLabel(
