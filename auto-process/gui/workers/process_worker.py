@@ -187,6 +187,12 @@ class ProcessWorker(threading.Thread):
                 if os.path.abspath(fp) != os.path.abspath(dest):
                     shutil.copy2(fp, dest)
                     logger.info(f"已儲存: {dest}")
+                    # 刪除原始位置的暫存裁剪檔（不刪原始影片）
+                    if os.path.abspath(fp) != os.path.abspath(video_path):
+                        try:
+                            os.remove(fp)
+                        except OSError:
+                            pass
                 saved_files.append(dest)
             trimmed_files = saved_files
 
