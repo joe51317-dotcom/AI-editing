@@ -164,6 +164,77 @@ def render_video(source_video, kept_segments, output_path,
 # ── 片頭/片尾功能 ─────────────────────────────────────
 
 
+def _get_duration(video_path):
+    """用 FFprobe 取得影片時長（秒）"""
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    cmd = [
+        ffprobe, "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            creationflags=_SUBPROCESS_FLAGS)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFprobe 取得時長失敗: {result.stderr}")
+    return float(result.stdout.strip())
+
+
+def apply_audio_fade(video_path, fade_duration=1.0):
+    """
+    為影片頭尾加上 Constant Power 音頻淡入淡出（只重新編碼音訊）。
+
+    Args:
+        video_path: 影片路徑（直接覆蓋原檔）
+        fade_duration: 淡入/淡出秒數（預設 1 秒）
+
+    Returns:
+        bool: 成功與否
+    """
+    try:
+        dur = _get_duration(video_path)
+    except RuntimeError as e:
+        logger.error(f"apply_audio_fade: {e}")
+        return False
+
+    fade_out_start = max(0.0, dur - fade_duration)
+    af = (
+        f"afade=t=in:d={fade_duration}:curve=qsin,"
+        f"afade=t=out:st={fade_out_start}:d={fade_duration}:curve=qsin"
+    )
+
+    ffmpeg = get_ffmpeg_path() or "ffmpeg"
+    temp_dir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
+    try:
+        out = os.path.join(temp_dir, "audio_fade.mp4")
+        cmd = [
+            ffmpeg, "-y",
+            "-i", video_path,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-af", af,
+            out,
+        ]
+        result = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_SUBPROCESS_FLAGS,
+        )
+        if result.returncode != 0:
+            logger.error(f"音頻淡入淡出失敗: {result.stderr.decode(errors='replace')}")
+            return False
+        shutil.move(out, video_path)
+        logger.info(f"已套用音頻淡入淡出 ({fade_duration}s)")
+        return True
+    except Exception as e:
+        logger.error(f"apply_audio_fade 發生錯誤: {e}")
+        return False
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass
+
+
 def probe_video(video_path):
     """
     用 FFprobe 取得影片的視訊/音訊屬性。
@@ -231,10 +302,14 @@ def probe_video(video_path):
     return props
 
 
-def create_image_video(image_path, output_path, duration, fade_duration, video_props):
+def create_image_video(image_path, output_path, duration, fade_duration, video_props,
+                       skip_fade_in=False):
     """
     將靜態圖片轉換為帶淡入淡出效果的影片（含靜音音軌）。
     輸出的 codec/解析度/fps 會匹配來源影片，以便後續用 concat demuxer 合併。
+
+    Args:
+        skip_fade_in: 為 True 時跳過 fade-in（片尾用，因為 xfade 會處理進場過渡）
     """
     ffmpeg = get_ffmpeg_path() or "ffmpeg"
     w = video_props["width"]
@@ -249,7 +324,9 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
     vf = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
     if fade_duration > 0:
         fade_out_start = max(0, duration - fade_duration)
-        vf += f",fade=t=in:d={fade_duration},fade=t=out:st={fade_out_start}:d={fade_duration}"
+        if not skip_fade_in:
+            vf += f",fade=t=in:d={fade_duration}"
+        vf += f",fade=t=out:st={fade_out_start}:d={fade_duration}"
     vf += f",format={pix_fmt}"
 
     cmd = [
@@ -275,19 +352,42 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
     return True
 
 
+def _concat_copy(ffmpeg, file_list, output_path, temp_dir):
+    """用 concat demuxer (-c copy) 快速串接多個影片檔案。"""
+    list_path = os.path.join(temp_dir, f"concat_{os.path.basename(output_path)}.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for fp in file_list:
+            safe = fp.replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+    cmd = [
+        ffmpeg, "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", list_path,
+        "-c", "copy",
+        output_path,
+    ]
+    result = subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=_SUBPROCESS_FLAGS,
+    )
+    return result.returncode == 0
+
+
 def add_intro_outro(video_path, intro_image=None, outro_image=None,
                     intro_duration=3, outro_duration=3, fade_duration=0.5):
     """
     為影片加上片頭/片尾圖片。
 
-    用 concat demuxer（-c copy）合併 intro + 主影片 + outro，
-    不重新編碼主影片，速度快。
+    - Intro：concat demuxer（-c copy）串接，快速
+    - Outro：Split Tail — 只重新編碼尾巴幾秒做 xfade cross dissolve，
+      其餘維持 -c copy，三小時影片仍可在分鐘級完成
+    - 不處理音頻淡入淡出（由呼叫端另行呼叫 apply_audio_fade）
 
     Args:
-        video_path: 裁剪後的影片路徑
+        video_path: 裁剪後的影片路徑（成功時會被覆蓋）
         intro_image/outro_image: 圖片路徑（None 則跳過）
         intro_duration/outro_duration: 圖片持續秒數
-        fade_duration: 淡入淡出秒數
+        fade_duration: 視訊淡入淡出秒數（xfade duration）
 
     Returns:
         str: 成功回傳輸出路徑，失敗回傳 None
@@ -300,88 +400,147 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
         logger.error("無法偵測影片屬性，跳過片頭/片尾")
         return None
 
+    ffmpeg = get_ffmpeg_path() or "ffmpeg"
     temp_dir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
 
     try:
-        concat_files = []
+        current_video = video_path
 
-        # 建立片頭影片
+        # ── Phase A：Intro concat（-c copy，快速）──────────────────
         if intro_image and os.path.isfile(intro_image):
             intro_video = os.path.join(temp_dir, "intro.mp4")
             if create_image_video(intro_image, intro_video, intro_duration,
                                   fade_duration, props):
-                concat_files.append(intro_video)
-                logger.info(f"片頭影片已建立 ({intro_duration}s)")
+                intro_merged = os.path.join(temp_dir, "intro_merged.mp4")
+                if _concat_copy(ffmpeg, [intro_video, current_video],
+                                intro_merged, temp_dir):
+                    current_video = intro_merged
+                    logger.info(f"片頭已串接 ({intro_duration}s)")
+                else:
+                    logger.warning("片頭 concat 失敗，跳過片頭")
             else:
                 logger.warning("建立片頭影片失敗，繼續不加片頭")
 
-        # 主影片
-        concat_files.append(video_path)
-
-        # 建立片尾影片
+        # ── Phase B：Outro cross dissolve（Split Tail）────────────
         if outro_image and os.path.isfile(outro_image):
+            # B0: 建立 outro 影片（無 fade-in，xfade 會處理過渡）
             outro_video = os.path.join(temp_dir, "outro.mp4")
-            if create_image_video(outro_image, outro_video, outro_duration,
-                                  fade_duration, props):
-                concat_files.append(outro_video)
-                logger.info(f"片尾影片已建立 ({outro_duration}s)")
-            else:
-                logger.warning("建立片尾影片失敗，繼續不加片尾")
+            if not create_image_video(outro_image, outro_video, outro_duration,
+                                      fade_duration, props, skip_fade_in=True):
+                logger.warning("建立片尾影片失敗，降級為 concat 串接")
+                outro_fb = os.path.join(temp_dir, "outro_fb.mp4")
+                if create_image_video(outro_image, outro_fb, outro_duration,
+                                      fade_duration, props):
+                    output_path = os.path.join(temp_dir, "output.mp4")
+                    _concat_copy(ffmpeg, [current_video, outro_fb],
+                                 output_path, temp_dir)
+                    shutil.move(output_path, video_path)
+                return video_path
 
-        # 沒有成功建立任何片頭/片尾
-        if len(concat_files) == 1:
-            return video_path
+            try:
+                main_dur = _get_duration(current_video)
+            except RuntimeError as e:
+                logger.error(f"無法取得影片時長: {e}")
+                return None
 
-        # concat demuxer 合併
-        list_path = os.path.join(temp_dir, "concat_list.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for fp in concat_files:
-                safe = fp.replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{safe}'\n")
+            # B1: 分割 body + tail
+            tail_seconds = min(fade_duration + 2.0, main_dur)
+            body_end = main_dur - tail_seconds
 
-        output_path = os.path.join(temp_dir, "output.mp4")
-        ffmpeg = get_ffmpeg_path() or "ffmpeg"
+            body_path = os.path.join(temp_dir, "body.mp4")
+            tail_path = os.path.join(temp_dir, "tail.mp4")
 
-        cmd = [
-            ffmpeg, "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", list_path,
-            "-c", "copy",
-            output_path,
-        ]
-        result = subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=_SUBPROCESS_FLAGS,
-        )
+            # body: -c copy（快速）
+            body_cmd = [
+                ffmpeg, "-y",
+                "-i", current_video,
+                "-t", str(body_end),
+                "-c", "copy",
+                "-avoid_negative_ts", "1",
+                body_path,
+            ]
+            # tail: 重新編碼（只有幾秒，極快）
+            tail_cmd = [
+                ffmpeg, "-y",
+                "-ss", str(body_end),
+                "-i", current_video,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "128k",
+                "-r", str(props["fps"]),
+                tail_path,
+            ]
 
-        if result.returncode != 0:
-            # 嘗試 filter_complex 重新編碼合併
-            logger.warning("concat demuxer 失敗，嘗試重新編碼合併...")
-            cmd_fb = [ffmpeg, "-y"]
-            for fp in concat_files:
-                cmd_fb.extend(["-i", fp])
-            n = len(concat_files)
-            fc = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-            fc += f"concat=n={n}:v=1:a=1[outv][outa]"
-            cmd_fb.extend([
+            r_body = subprocess.run(
+                body_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+            r_tail = subprocess.run(
+                tail_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+
+            if r_body.returncode != 0 or r_tail.returncode != 0:
+                logger.error("分割 body/tail 失敗，降級為 concat 串接")
+                output_path = os.path.join(temp_dir, "output.mp4")
+                _concat_copy(ffmpeg, [current_video, outro_video],
+                             output_path, temp_dir)
+                shutil.move(output_path, video_path)
+                return video_path
+
+            # B2: xfade tail + outro（只處理幾秒，極快）
+            try:
+                tail_dur = _get_duration(tail_path)
+            except RuntimeError:
+                tail_dur = tail_seconds
+
+            xfade_offset = max(0.0, tail_dur - fade_duration)
+            fc = (
+                f"[0:v][1:v]xfade=transition=fade:duration={fade_duration}"
+                f":offset={xfade_offset}[outv];"
+                f"[0:a][1:a]acrossfade=d={fade_duration}"
+                f":c1=qsin:c2=qsin[outa]"
+            )
+
+            transition_path = os.path.join(temp_dir, "transition.mp4")
+            xfade_cmd = [
+                ffmpeg, "-y",
+                "-i", tail_path,
+                "-i", outro_video,
                 "-filter_complex", fc,
                 "-map", "[outv]", "-map", "[outa]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "128k",
                 "-r", str(props["fps"]),
-                output_path,
-            ])
-            result = subprocess.run(
-                cmd_fb, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                transition_path,
+            ]
+            r_xfade = subprocess.run(
+                xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=_SUBPROCESS_FLAGS,
             )
-            if result.returncode != 0:
-                stderr_text = result.stderr.decode(errors='replace')
-                logger.error(f"合併片頭/片尾失敗: {stderr_text}")
+            if r_xfade.returncode != 0:
+                stderr_text = r_xfade.stderr.decode(errors='replace')
+                logger.error(f"xfade 失敗: {stderr_text}，降級為 concat 串接")
+                output_path = os.path.join(temp_dir, "output.mp4")
+                _concat_copy(ffmpeg, [current_video, outro_video],
+                             output_path, temp_dir)
+                shutil.move(output_path, video_path)
+                return video_path
+
+            # B3: concat body + transition（-c copy，快速）
+            output_path = os.path.join(temp_dir, "output.mp4")
+            if not _concat_copy(ffmpeg, [body_path, transition_path],
+                                output_path, temp_dir):
+                logger.error("concat body+transition 失敗")
                 return None
 
-        # 用合併結果取代原始檔案
-        shutil.move(output_path, video_path)
+            shutil.move(output_path, video_path)
+            logger.info(f"片尾 cross dissolve 已套用 ({outro_duration}s, xfade={fade_duration}s)")
+
+        else:
+            # 只有 intro，current_video 已是 concat 結果
+            if current_video != video_path:
+                shutil.move(current_video, video_path)
+
         logger.info(f"片頭/片尾已加入: {os.path.basename(video_path)}")
         return video_path
 

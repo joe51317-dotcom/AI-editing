@@ -210,6 +210,19 @@ class ProcessWorker(threading.Thread):
         if self._stopped():
             return
 
+        # === Step 1.6: 音頻淡入淡出（一律套用，-c:v copy 極快）===
+        from video_renderer import apply_audio_fade
+        total = len(trimmed_files)
+        for i, fp in enumerate(trimmed_files):
+            if self._stopped():
+                return
+            self._send(filename, "status",
+                       text=f"套用音頻淡入淡出 ({i+1}/{total})...")
+            apply_audio_fade(fp)
+
+        if self._stopped():
+            return
+
         # === Step 2: 複製到輸出目錄 ===
         if self.output_dir:
             self._send(filename, "status", text="儲存到輸出目錄...")
