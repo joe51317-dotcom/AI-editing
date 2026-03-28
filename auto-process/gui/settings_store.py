@@ -18,6 +18,12 @@ DEFAULTS = {
     "upload_enabled": True,
     "privacy_status": "不公開",
     "window_geometry": None,
+    "intro_outro_enabled": False,
+    "intro_path": None,
+    "outro_path": None,
+    "intro_duration": "3",
+    "outro_duration": "3",
+    "fade_duration": "0.5",
 }
 
 

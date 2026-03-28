@@ -29,7 +29,8 @@ class ProcessWorker(threading.Thread):
                  output_dir=None, upload_enabled=True,
                  youtube_service=None, privacy_status="unlisted",
                  playlist_id=None, thumbnail_path=None,
-                 naming_rule="{filename}"):
+                 naming_rule="{filename}",
+                 intro_outro=None):
         super().__init__(daemon=True)
         self.videos = videos  # [{'path': str, 'title': str}, ...]
         self.queue = callback_queue
@@ -45,6 +46,7 @@ class ProcessWorker(threading.Thread):
         self.playlist_id = playlist_id
         self.thumbnail_path = thumbnail_path
         self.naming_rule = naming_rule
+        self.intro_outro = intro_outro  # dict or None
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -173,6 +175,33 @@ class ProcessWorker(threading.Thread):
             # --- 跳過裁剪 ---
             trimmed_files = [video_path]
             self._send(filename, "progress", value=TRIM_PROGRESS_END, text="跳過裁剪")
+
+        if self._stopped():
+            return
+
+        # === Step 1.5: 加入片頭/片尾 ===
+        if self.intro_outro and self.intro_outro.get("enabled"):
+            from video_renderer import add_intro_outro
+
+            total = len(trimmed_files)
+            for i, fp in enumerate(trimmed_files):
+                if self._stopped():
+                    return
+                self._send(filename, "status",
+                           text=f"加入片頭/片尾 ({i+1}/{total})...")
+                self._send(filename, "progress",
+                           value=TRIM_PROGRESS_END + 0.02)
+
+                result = add_intro_outro(
+                    video_path=fp,
+                    intro_image=self.intro_outro.get("intro_path"),
+                    outro_image=self.intro_outro.get("outro_path"),
+                    intro_duration=self.intro_outro.get("intro_duration", 3),
+                    outro_duration=self.intro_outro.get("outro_duration", 3),
+                    fade_duration=self.intro_outro.get("fade_duration", 0.5),
+                )
+                if not result:
+                    logger.warning(f"片頭/片尾加入失敗: {os.path.basename(fp)}")
 
         if self._stopped():
             return

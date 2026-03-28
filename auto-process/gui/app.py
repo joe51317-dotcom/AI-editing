@@ -332,6 +332,11 @@ class AutoProcessApp(ctk.CTk):
             filename = os.path.basename(v["path"])
             self.progress_panel.add_video(filename)
 
+        # 片頭/片尾設定
+        intro_outro = None
+        if self.settings_panel.is_intro_outro_enabled():
+            intro_outro = self.settings_panel.get_intro_outro_settings()
+
         # 啟動 Worker
         from gui.workers.process_worker import ProcessWorker
         self.current_worker = ProcessWorker(
@@ -348,6 +353,7 @@ class AutoProcessApp(ctk.CTk):
             playlist_id=self.youtube_panel.get_selected_playlist_id(),
             thumbnail_path=self.youtube_panel.get_thumbnail_path(),
             naming_rule=self.video_panel.get_naming_rule(),
+            intro_outro=intro_outro,
         )
         self.current_worker.start()
 
