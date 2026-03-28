@@ -73,20 +73,25 @@ def detect_silence(video_path, noise_db=-30, min_duration=10,
 
     stderr_lines = []
     last_report = 0
-    for raw_line in proc.stderr:
-        line = raw_line.decode("utf-8", errors="replace")
-        stderr_lines.append(line)
+    try:
+        for raw_line in proc.stderr:
+            line = raw_line.decode("utf-8", errors="replace")
+            stderr_lines.append(line)
 
-        if progress_callback and total_duration and total_duration > 0:
-            t = _parse_ffmpeg_time(line)
-            if t is not None and t - last_report >= 2:  # 每 2 秒更新一次
-                last_report = t
-                pct = min(t / total_duration, 0.99)
-                mins = int(t) // 60
-                secs = int(t) % 60
-                progress_callback(pct, f"偵測靜音中... {mins}:{secs:02d} / {int(total_duration)//60}:{int(total_duration)%60:02d}")
+            if progress_callback and total_duration and total_duration > 0:
+                t = _parse_ffmpeg_time(line)
+                if t is not None and t - last_report >= 2:  # 每 2 秒更新一次
+                    last_report = t
+                    pct = min(t / total_duration, 0.99)
+                    mins = int(t) // 60
+                    secs = int(t) % 60
+                    progress_callback(pct, f"偵測靜音中... {mins}:{secs:02d} / {int(total_duration)//60}:{int(total_duration)%60:02d}")
 
-    proc.wait()
+        proc.wait()
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
     stderr = "".join(stderr_lines)
     silence_regions = []
 

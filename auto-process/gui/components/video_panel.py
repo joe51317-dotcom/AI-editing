@@ -2,8 +2,9 @@
 影片選擇面板 — 拖放區域 + 影片清單 + 友善命名選擇
 """
 import os
+import threading
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
 
@@ -26,13 +27,19 @@ class VideoItem(ctk.CTkFrame):
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
         info_frame.pack(side="left", fill="x", expand=True, padx=PADDING["small"], pady=4)
 
-        ctk.CTkLabel(
+        self.info_label = ctk.CTkLabel(
             info_frame,
             text=f"{filename}  ({size_mb:.0f} MB)",
             font=(FONT_FAMILY, FONT_SIZES["body"]),
             text_color=COLORS["text_primary"],
             anchor="w",
-        ).pack(side="top", anchor="w")
+        )
+        self.info_label.pack(side="top", anchor="w")
+
+        # 背景取得影片時長
+        self._size_mb = size_mb
+        self._filename = filename
+        threading.Thread(target=self._probe_duration, daemon=True).start()
 
         # 標題編輯
         title_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
@@ -70,6 +77,23 @@ class VideoItem(ctk.CTkFrame):
             text_color=COLORS["text_dim"],
             command=self._remove,
         ).pack(side="right", padx=PADDING["small"])
+
+    def _probe_duration(self):
+        """背景用 ffprobe 取得影片時長"""
+        try:
+            from silence_detector import get_video_duration
+            dur = get_video_duration(self.video_path)
+            mins, secs = divmod(int(dur), 60)
+            hours, mins = divmod(mins, 60)
+            if hours > 0:
+                dur_text = f"{hours}:{mins:02d}:{secs:02d}"
+            else:
+                dur_text = f"{mins}:{secs:02d}"
+            self.after(0, lambda: self.info_label.configure(
+                text=f"{self._filename}  ({self._size_mb:.0f} MB · {dur_text})"
+            ))
+        except Exception:
+            pass
 
     def _remove(self):
         self.on_remove(self)
@@ -397,5 +421,9 @@ class VideoPanel(ctk.CTkFrame):
         return self.naming_panel.get_naming_rule()
 
     def clear_all(self):
+        if not self.video_items:
+            return
+        if not messagebox.askyesno("清除全部", f"確定要移除全部 {len(self.video_items)} 個影片？"):
+            return
         for item in list(self.video_items):
             self._remove_video(item)

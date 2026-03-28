@@ -18,6 +18,7 @@ DEFAULTS = {
     "upload_enabled": True,
     "privacy_status": "不公開",
     "window_geometry": None,
+    "description_template": "",
     "intro_outro_enabled": False,
     "intro_path": None,
     "outro_path": None,

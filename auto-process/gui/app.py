@@ -52,6 +52,7 @@ class AutoProcessApp(ctk.CTk):
         self.callback_queue = queue.Queue()
         self.processing = False
         self.current_worker = None
+        self._video_map = {}  # filename → {path, title, index}
 
         self._build_ui()
         self._setup_logging()
@@ -211,7 +212,7 @@ class AutoProcessApp(ctk.CTk):
         self.stop_btn.pack(side="right")
 
         # 進度面板
-        self.progress_panel = ProgressPanel(right_col)
+        self.progress_panel = ProgressPanel(right_col, on_retry=self._retry_video)
         self.progress_panel.grid(row=3, column=0, sticky="ew", pady=(0, 5))
 
         # 日誌面板（預設收合，展開時填滿剩餘空間）
@@ -262,7 +263,8 @@ class AutoProcessApp(ctk.CTk):
             item.set_error(msg.get("text", "失敗"))
 
         elif msg_type == "all_done":
-            self._on_all_done()
+            if self.processing:
+                self._on_all_done()
 
     def _start_processing(self):
         """開始處理所有影片"""
@@ -283,19 +285,28 @@ class AutoProcessApp(ctk.CTk):
     def _download_ffmpeg_then_start(self, videos):
         """下載 FFmpeg 後開始處理"""
         def _download():
-            from ffmpeg_manager import download_ffmpeg
-            success = download_ffmpeg(
-                progress_callback=lambda dl, total: self.callback_queue.put({
-                    "type": "status",
-                    "filename": "__ffmpeg__",
-                    "text": f"下載 FFmpeg... {dl // (1024*1024)}MB / {total // (1024*1024)}MB",
+            try:
+                from ffmpeg_manager import download_ffmpeg
+                success = download_ffmpeg(
+                    progress_callback=lambda dl, total: self.callback_queue.put({
+                        "type": "status",
+                        "filename": "__ffmpeg__",
+                        "text": f"下載 FFmpeg... {dl // (1024*1024)}MB / {total // (1024*1024)}MB",
+                    })
+                )
+                if success:
+                    self.after(0, lambda: self._begin_processing(videos))
+                else:
+                    self.callback_queue.put({
+                        "type": "error", "filename": "__ffmpeg__",
+                        "text": "FFmpeg 下載失敗，請手動安裝",
+                    })
+            except Exception as e:
+                logger.error(f"FFmpeg 下載異常: {e}")
+                self.callback_queue.put({
+                    "type": "error", "filename": "__ffmpeg__",
+                    "text": f"FFmpeg 下載異常: {e}",
                 })
-            )
-            if success:
-                self.after(0, lambda: self._begin_processing(videos))
-            else:
-                self.after(0, lambda: logger.error("FFmpeg 下載失敗，請手動安裝"))
-                self.after(0, self._on_all_done)
 
         self.progress_panel.clear()
         self.progress_panel.add_video("__ffmpeg__").set_status("下載 FFmpeg...")
@@ -328,9 +339,11 @@ class AutoProcessApp(ctk.CTk):
         self.progress_panel.start_timer()
 
         # 為每個影片建立進度項目
-        for v in videos:
+        self._video_map.clear()
+        for idx, v in enumerate(videos, start=1):
             filename = os.path.basename(v["path"])
             self.progress_panel.add_video(filename)
+            self._video_map[filename] = {"path": v["path"], "title": v["title"], "index": idx}
 
         # 片頭/片尾設定
         intro_outro = None
@@ -352,6 +365,7 @@ class AutoProcessApp(ctk.CTk):
             privacy_status=self.youtube_panel.get_privacy_status(),
             playlist_id=self.youtube_panel.get_selected_playlist_id(),
             thumbnail_path=self.youtube_panel.get_thumbnail_path(),
+            description_template=self.youtube_panel.get_description(),
             naming_rule=self.video_panel.get_naming_rule(),
             intro_outro=intro_outro,
         )
@@ -376,6 +390,46 @@ class AutoProcessApp(ctk.CTk):
         output_dir = self.youtube_panel.get_output_dir()
         self.progress_panel.show_done(count, output_dir)
         logger.info(f"所有處理完成（{count} 個影片）")
+
+    def _retry_video(self, filename):
+        """重試單一失敗影片"""
+        info = self._video_map.get(filename)
+        if not info:
+            logger.warning(f"找不到影片資訊: {filename}")
+            return
+
+        trim_mode = self.settings_panel.get_trim_mode()
+
+        manual_segments = None
+        if trim_mode == "manual":
+            segments, errors = self.settings_panel.get_manual_segments()
+            if not errors and segments:
+                manual_segments = segments
+
+        intro_outro = None
+        if self.settings_panel.is_intro_outro_enabled():
+            intro_outro = self.settings_panel.get_intro_outro_settings()
+
+        from gui.workers.process_worker import ProcessWorker
+        worker = ProcessWorker(
+            videos=[{"path": info["path"], "title": info["title"]}],
+            callback_queue=self.callback_queue,
+            trim_mode=trim_mode,
+            speech_threshold=self.settings_panel.get_speech_threshold(),
+            break_threshold=self.settings_panel.get_break_threshold(),
+            manual_segments=manual_segments,
+            output_dir=self.youtube_panel.get_output_dir(),
+            upload_enabled=self.youtube_panel.is_upload_enabled(),
+            youtube_service=self.youtube_panel.get_youtube_service(),
+            privacy_status=self.youtube_panel.get_privacy_status(),
+            playlist_id=self.youtube_panel.get_selected_playlist_id(),
+            thumbnail_path=self.youtube_panel.get_thumbnail_path(),
+            description_template=self.youtube_panel.get_description(),
+            naming_rule=self.video_panel.get_naming_rule(),
+            intro_outro=intro_outro,
+        )
+        worker.start()
+        logger.info(f"重試處理: {filename}")
 
     # ── FFmpeg 自動偵測 ────────────────────────────────
 

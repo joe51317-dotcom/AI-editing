@@ -30,6 +30,7 @@ class ProcessWorker(threading.Thread):
                  youtube_service=None, privacy_status="unlisted",
                  playlist_id=None, thumbnail_path=None,
                  naming_rule="{filename}",
+                 description_template="",
                  intro_outro=None):
         super().__init__(daemon=True)
         self.videos = videos  # [{'path': str, 'title': str}, ...]
@@ -46,6 +47,7 @@ class ProcessWorker(threading.Thread):
         self.playlist_id = playlist_id
         self.thumbnail_path = thumbnail_path
         self.naming_rule = naming_rule
+        self.description_template = description_template or ""
         self.intro_outro = intro_outro  # dict or None
         self._stop_event = threading.Event()
 
@@ -201,7 +203,9 @@ class ProcessWorker(threading.Thread):
                     fade_duration=self.intro_outro.get("fade_duration", 0.5),
                 )
                 if not result:
-                    logger.warning(f"片頭/片尾加入失敗: {os.path.basename(fp)}")
+                    msg = f"片頭/片尾加入失敗: {os.path.basename(fp)}"
+                    logger.warning(msg)
+                    self._send(filename, "status", text=msg)
 
         if self._stopped():
             return
@@ -263,6 +267,7 @@ class ProcessWorker(threading.Thread):
             video_id = upload_video(
                 file_path,
                 title=part_title,
+                description=self.description_template,
                 privacy_status=self.privacy_status,
                 progress_callback=upload_progress,
             )

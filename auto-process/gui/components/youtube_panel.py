@@ -460,6 +460,31 @@ class YouTubePanel(ctk.CTkFrame):
             command=self._clear_thumbnail,
         ).pack(side="left", padx=(2, 0))
 
+        # ── 影片描述模板 ──────────────────────────
+        desc_row = ctk.CTkFrame(self.yt_settings_frame, fg_color="transparent")
+        desc_row.pack(fill="x", pady=(4, 2))
+
+        ctk.CTkLabel(
+            desc_row,
+            text="影片描述:",
+            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            text_color=COLORS["text_secondary"],
+            anchor="nw",
+        ).pack(anchor="w")
+
+        self.description_textbox = ctk.CTkTextbox(
+            desc_row,
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text_primary"],
+            border_width=1,
+            corner_radius=6,
+            height=50,
+            wrap="word",
+        )
+        self.description_textbox.pack(fill="x", pady=(2, 0))
+
     # ── 儲存位置 ────────────────────────────────────
 
     def _browse_output_dir(self):
@@ -601,6 +626,7 @@ class YouTubePanel(ctk.CTkFrame):
             "output_dir": self.output_dir_var.get(),
             "upload_enabled": self.upload_var.get(),
             "privacy_status": self.privacy_var.get(),
+            "description_template": self.get_description(),
         }
 
     def set_state(self, state):
@@ -616,6 +642,9 @@ class YouTubePanel(ctk.CTkFrame):
             self._toggle_youtube_settings()
         if "privacy_status" in state:
             self.privacy_var.set(state["privacy_status"])
+        if state.get("description_template"):
+            self.description_textbox.delete("1.0", "end")
+            self.description_textbox.insert("1.0", state["description_template"])
 
     def get_output_dir(self):
         """取得輸出資料夾路徑"""
@@ -636,6 +665,10 @@ class YouTubePanel(ctk.CTkFrame):
 
     def get_thumbnail_path(self):
         return self.thumbnail_path
+
+    def get_description(self):
+        """取得影片描述模板"""
+        return self.description_textbox.get("1.0", "end").strip()
 
     def get_youtube_service(self):
         return self.youtube_service

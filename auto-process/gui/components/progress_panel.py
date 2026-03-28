@@ -12,9 +12,10 @@ from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
 class ProgressItem(ctk.CTkFrame):
     """單一影片進度列"""
 
-    def __init__(self, master, filename, **kwargs):
+    def __init__(self, master, filename, on_retry=None, **kwargs):
         super().__init__(master, fg_color=COLORS["bg_hover"], corner_radius=6, **kwargs)
         self.filename = filename
+        self._on_retry = on_retry
 
         inner = ctk.CTkFrame(self, fg_color="transparent")
         inner.pack(fill="x", padx=PADDING["small"], pady=4)
@@ -31,6 +32,19 @@ class ProgressItem(ctk.CTkFrame):
             anchor="w",
         )
         self.name_label.pack(side="left")
+
+        self.retry_btn = ctk.CTkButton(
+            top,
+            text="重試",
+            width=50,
+            height=20,
+            font=(FONT_FAMILY, FONT_SIZES["tiny"]),
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["bg_dark"],
+            corner_radius=4,
+            command=self._retry,
+        )
 
         self.status_label = ctk.CTkLabel(
             top,
@@ -66,17 +80,29 @@ class ProgressItem(ctk.CTkFrame):
         self.set_progress(1.0)
         self.progress_bar.configure(progress_color=COLORS["success"])
 
+    def _retry(self):
+        """重試此影片"""
+        if self._on_retry:
+            self.retry_btn.pack_forget()
+            self.set_status("等待重試...", COLORS["text_dim"])
+            self.progress_bar.configure(progress_color=COLORS["accent"])
+            self.progress_bar.set(0)
+            self._on_retry(self.filename)
+
     def set_error(self, msg="失敗"):
         self.set_status(msg, COLORS["error"])
         self.progress_bar.configure(progress_color=COLORS["error"])
+        if self._on_retry:
+            self.retry_btn.pack(side="right", padx=(0, 4))
 
 
 class ProgressPanel(ctk.CTkFrame):
     """處理進度面板"""
 
-    def __init__(self, master, **kwargs):
+    def __init__(self, master, on_retry=None, **kwargs):
         super().__init__(master, fg_color=COLORS["bg_card"], corner_radius=CORNER_RADIUS, **kwargs)
         self.items = {}
+        self._on_retry = on_retry
         self._timer_start = None
         self._timer_after_id = None
 
@@ -148,7 +174,7 @@ class ProgressPanel(ctk.CTkFrame):
         if self.empty_label.winfo_ismapped():
             self.empty_label.pack_forget()
 
-        item = ProgressItem(self.list_frame, filename)
+        item = ProgressItem(self.list_frame, filename, on_retry=self._on_retry)
         item.pack(fill="x", pady=2)
         self.items[filename] = item
         return item
