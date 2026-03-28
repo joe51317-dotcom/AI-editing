@@ -509,6 +509,15 @@ def split_into_parts(video_path, speech_threshold_db=-20, min_duration=10, break
         logger.warning("精確修剪後沒有保留的片段！")
         return []
 
+    # 結尾緩衝：每個 part 結尾多保留 1 秒（自然收尾，避免片尾 cross dissolve 覆蓋語音）
+    _END_PADDING = 1.0
+    for i, p in enumerate(parts):
+        max_end = parts[i + 1]["start"] if i < len(parts) - 1 else total_duration
+        new_end = min(p["end"] + _END_PADDING, max_end)
+        if new_end > p["end"]:
+            logger.info(f"  Part {i+1}: 結尾延伸 {new_end - p['end']:.1f}s（收尾緩衝）")
+            p["end"] = new_end
+
     # 將每個 part 包裝成 list[list[dict]] 格式（每個 part 含一個 segment）
     result = [[p] for p in parts]
 
