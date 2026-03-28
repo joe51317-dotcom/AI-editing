@@ -3,11 +3,14 @@
 執行方式：python bump_and_build.py
 或透過 build.bat 呼叫
 """
+import io
 import re
 import sys
 import os
 import shutil
 import subprocess
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
