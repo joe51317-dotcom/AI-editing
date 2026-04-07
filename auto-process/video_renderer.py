@@ -395,8 +395,9 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
         cmd = [
             ffmpeg, "-y",
             "-i", fp,
-            "-c", "copy",
+            "-c:v", "copy",
             "-bsf:v", "h264_mp4toannexb",
+            "-c:a", "aac", "-b:a", "192k",   # 統一音頻為 AAC（TS 不支援 pcm_f32le 等格式）
             "-f", "mpegts",
             ts_path,
         ]
@@ -465,18 +466,24 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
     try:
         current_video = video_path
 
-        # ── Phase A：Intro concat（-c copy，快速）──────────────────
+        # ── Phase A：Intro concat（透過 TS 避免 timebase 不匹配）────
         if intro_image and os.path.isfile(intro_image):
             intro_video = os.path.join(temp_dir, "intro.mp4")
             if create_image_video(intro_image, intro_video, intro_duration,
                                   fade_duration, props):
                 intro_merged = os.path.join(temp_dir, "intro_merged.mp4")
-                if _concat_copy(ffmpeg, [intro_video, current_video],
-                                intro_merged, temp_dir):
+                if _concat_via_ts(ffmpeg, [intro_video, current_video],
+                                  intro_merged, temp_dir):
                     current_video = intro_merged
                     logger.info(f"片頭已串接 ({intro_duration}s)")
                 else:
-                    logger.warning("片頭 concat 失敗，跳過片頭")
+                    logger.warning("TS 片頭 concat 失敗，嘗試直接 concat")
+                    if _concat_copy(ffmpeg, [intro_video, current_video],
+                                    intro_merged, temp_dir):
+                        current_video = intro_merged
+                        logger.info(f"片頭已串接 ({intro_duration}s, fallback)")
+                    else:
+                        logger.warning("片頭 concat 失敗，跳過片頭")
             else:
                 logger.warning("建立片頭影片失敗，繼續不加片頭")
 
