@@ -498,12 +498,14 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                         "-r", str(props["fps"]),
                         head_path,
                     ]
+                    # output seeking: -ss 在 -i 之後，確保 rest 從 head_seconds
+                    # 之後的第一個 keyframe 開始（避免 input seeking 從前一個
+                    # keyframe 開始導致影片開頭重複）
                     rest_cmd = [
                         ffmpeg, "-y",
-                        "-ss", str(head_seconds),
                         "-i", current_video,
+                        "-ss", str(head_seconds),
                         "-c", "copy",
-                        "-avoid_negative_ts", "1",
                         rest_path,
                     ]
                     r_head = subprocess.run(
