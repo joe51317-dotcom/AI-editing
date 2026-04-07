@@ -249,7 +249,7 @@ def probe_video(video_path):
     cmd_v = [
         ffprobe, "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,r_frame_rate,pix_fmt",
+        "-show_entries", "stream=width,height,r_frame_rate,pix_fmt,time_base",
         "-of", "json",
         video_path,
     ]
@@ -265,11 +265,20 @@ def probe_video(video_path):
         # r_frame_rate 格式如 "30000/1001"
         num, den = stream["r_frame_rate"].split("/")
         fps = round(float(num) / float(den), 2)
+        # time_base 格式如 "1/90000"，取分母作為 container timescale
+        timescale = None
+        tb = stream.get("time_base", "")
+        if "/" in tb:
+            try:
+                timescale = int(tb.split("/")[1])
+            except (ValueError, IndexError):
+                pass
         props = {
             "width": stream["width"],
             "height": stream["height"],
             "fps": fps,
             "pix_fmt": stream.get("pix_fmt", "yuv420p"),
+            "timescale": timescale,
         }
     except (json.JSONDecodeError, KeyError, IndexError, ValueError) as e:
         logger.error(f"解析視訊資訊失敗: {e}")
@@ -511,8 +520,13 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "128k",
                 "-r", str(props["fps"]),
-                transition_path,
             ]
+            # 強制 transition 的 container timescale 與 body 一致，
+            # 避免 concat demuxer 因 timebase 不匹配而壓縮 PTS
+            ts = props.get("timescale")
+            if ts:
+                xfade_cmd += ["-video_track_timescale", str(ts)]
+            xfade_cmd.append(transition_path)
             r_xfade = subprocess.run(
                 xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=_SUBPROCESS_FLAGS,
@@ -533,26 +547,7 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 logger.error("concat body+transition 失敗")
                 return None
 
-            # B4: remux 修正時間戳（body 與 transition 的 timebase 不同，
-            #     concat demuxer 可能產生壓縮的 PTS，導致片尾定格）
-            fixed_path = os.path.join(temp_dir, "fixed.mp4")
-            fix_cmd = [
-                ffmpeg, "-y",
-                "-fflags", "+genpts",
-                "-i", output_path,
-                "-c", "copy",
-                "-movflags", "+faststart",
-                fixed_path,
-            ]
-            r_fix = subprocess.run(
-                fix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_SUBPROCESS_FLAGS,
-            )
-            if r_fix.returncode == 0:
-                shutil.move(fixed_path, video_path)
-            else:
-                logger.warning("PTS remux 失敗，使用未修正版本")
-                shutil.move(output_path, video_path)
+            shutil.move(output_path, video_path)
             logger.info(f"片尾 cross dissolve 已套用 ({outro_duration}s, xfade={fade_duration}s)")
 
         else:
