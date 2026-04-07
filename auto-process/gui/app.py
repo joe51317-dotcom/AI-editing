@@ -349,6 +349,8 @@ class AutoProcessApp(ctk.CTk):
         intro_outro = None
         if self.settings_panel.is_intro_outro_enabled():
             intro_outro = self.settings_panel.get_intro_outro_settings()
+            if not intro_outro.get("intro_path") and not intro_outro.get("outro_path"):
+                logger.warning("⚠ 片頭/片尾已啟用但未選擇圖片，將不會加入片頭/片尾")
 
         # 啟動 Worker
         from gui.workers.process_worker import ProcessWorker
@@ -409,6 +411,8 @@ class AutoProcessApp(ctk.CTk):
         intro_outro = None
         if self.settings_panel.is_intro_outro_enabled():
             intro_outro = self.settings_panel.get_intro_outro_settings()
+            if not intro_outro.get("intro_path") and not intro_outro.get("outro_path"):
+                logger.warning("⚠ 片頭/片尾已啟用但未選擇圖片，將不會加入片頭/片尾")
 
         from gui.workers.process_worker import ProcessWorker
         worker = ProcessWorker(

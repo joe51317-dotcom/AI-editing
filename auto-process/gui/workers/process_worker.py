@@ -185,6 +185,15 @@ class ProcessWorker(threading.Thread):
         if self.intro_outro and self.intro_outro.get("enabled"):
             from video_renderer import add_intro_outro
 
+            intro_p = self.intro_outro.get("intro_path")
+            outro_p = self.intro_outro.get("outro_path")
+            if not intro_p and not outro_p:
+                logger.warning("片頭/片尾已啟用但未選擇任何圖片，跳過")
+                self._send(filename, "status",
+                           text="⚠ 片頭/片尾已啟用但未選擇圖片")
+            else:
+                logger.info(f"片頭/片尾: intro={intro_p}, outro={outro_p}")
+
             total = len(trimmed_files)
             for i, fp in enumerate(trimmed_files):
                 if self._stopped():
