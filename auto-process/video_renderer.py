@@ -382,6 +382,56 @@ def _concat_copy(ffmpeg, file_list, output_path, temp_dir):
     return result.returncode == 0
 
 
+def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
+    """透過 MPEG-TS 中間格式串接，解決不同 timebase 的 MP4 concat PTS 錯誤。
+
+    MP4 concat demuxer 在混合 stream-copied 和 re-encoded 段落時，
+    timebase 映射可能破壞 B-frame 的 PTS 順序。TS 使用固定 90kHz 時鐘，
+    能統一所有段落的時間基準，避免 PTS 錯誤。
+    """
+    ts_files = []
+    for i, fp in enumerate(file_list):
+        ts_path = os.path.join(temp_dir, f"seg_{i}.ts")
+        cmd = [
+            ffmpeg, "-y",
+            "-i", fp,
+            "-c", "copy",
+            "-bsf:v", "h264_mp4toannexb",
+            "-f", "mpegts",
+            ts_path,
+        ]
+        r = subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            creationflags=_SUBPROCESS_FLAGS,
+        )
+        if r.returncode != 0:
+            logger.error(f"轉換 TS 失敗: {r.stderr.decode(errors='replace')}")
+            return False
+        ts_files.append(ts_path)
+
+    list_path = os.path.join(temp_dir, f"concat_ts_{os.path.basename(output_path)}.txt")
+    with open(list_path, "w", encoding="utf-8") as f:
+        for tp in ts_files:
+            safe = tp.replace("\\", "/").replace("'", "'\\''")
+            f.write(f"file '{safe}'\n")
+
+    cmd = [
+        ffmpeg, "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", list_path,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        output_path,
+    ]
+    result = subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=_SUBPROCESS_FLAGS,
+    )
+    if result.returncode != 0:
+        logger.error(f"TS concat 失敗: {result.stderr.decode(errors='replace')}")
+    return result.returncode == 0
+
+
 def add_intro_outro(video_path, intro_image=None, outro_image=None,
                     intro_duration=3, outro_duration=3, fade_duration=0.5):
     """
@@ -520,13 +570,8 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "128k",
                 "-r", str(props["fps"]),
+                transition_path,
             ]
-            # 強制 transition 的 container timescale 與 body 一致，
-            # 避免 concat demuxer 因 timebase 不匹配而壓縮 PTS
-            ts = props.get("timescale")
-            if ts:
-                xfade_cmd += ["-video_track_timescale", str(ts)]
-            xfade_cmd.append(transition_path)
             r_xfade = subprocess.run(
                 xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=_SUBPROCESS_FLAGS,
@@ -540,12 +585,15 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 shutil.move(output_path, video_path)
                 return video_path
 
-            # B3: concat body + transition（-c copy，快速）
+            # B3: concat body + transition（透過 TS 中間格式避免 PTS 錯誤）
             output_path = os.path.join(temp_dir, "output.mp4")
-            if not _concat_copy(ffmpeg, [body_path, transition_path],
-                                output_path, temp_dir):
-                logger.error("concat body+transition 失敗")
-                return None
+            if not _concat_via_ts(ffmpeg, [body_path, transition_path],
+                                  output_path, temp_dir):
+                logger.warning("TS concat 失敗，降級為直接 concat")
+                if not _concat_copy(ffmpeg, [body_path, transition_path],
+                                    output_path, temp_dir):
+                    logger.error("concat body+transition 失敗")
+                    return None
 
             shutil.move(output_path, video_path)
             logger.info(f"片尾 cross dissolve 已套用 ({outro_duration}s, xfade={fade_duration}s)")
