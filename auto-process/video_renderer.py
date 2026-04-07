@@ -312,13 +312,14 @@ def probe_video(video_path):
 
 
 def create_image_video(image_path, output_path, duration, fade_duration, video_props,
-                       skip_fade_in=False):
+                       skip_fade_in=False, skip_fade_out=False):
     """
-    將靜態圖片轉換為帶淡入淡出效果的影片（含靜音音軌）。
+    將靜態圖片轉換為影片（含靜音音軌）。
     輸出的 codec/解析度/fps 會匹配來源影片，以便後續用 concat demuxer 合併。
 
     Args:
-        skip_fade_in: 為 True 時跳過 fade-in（片尾用，因為 xfade 會處理進場過渡）
+        skip_fade_in: 為 True 時跳過 fade-in（片尾用，xfade 會處理進場過渡）
+        skip_fade_out: 為 True 時跳過 fade-out（片尾用，圖片維持到結束）
     """
     ffmpeg = get_ffmpeg_path() or "ffmpeg"
     w = video_props["width"]
@@ -335,7 +336,8 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
         fade_out_start = max(0, duration - fade_duration)
         if not skip_fade_in:
             vf += f",fade=t=in:d={fade_duration}"
-        vf += f",fade=t=out:st={fade_out_start}:d={fade_duration}"
+        if not skip_fade_out:
+            vf += f",fade=t=out:st={fade_out_start}:d={fade_duration}"
     vf += f",format={pix_fmt}"
 
     cmd = [
@@ -466,33 +468,100 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
     try:
         current_video = video_path
 
-        # ── Phase A：Intro concat（透過 TS 避免 timebase 不匹配）────
+        # ── Phase A：Intro cross dissolve（Split Head）─────────────
         if intro_image and os.path.isfile(intro_image):
+            # A0: 建立 intro 影片（無 fade，xfade 處理過渡，第一幀即為圖片）
             intro_video = os.path.join(temp_dir, "intro.mp4")
-            if create_image_video(intro_image, intro_video, intro_duration,
-                                  fade_duration, props):
-                intro_merged = os.path.join(temp_dir, "intro_merged.mp4")
-                if _concat_via_ts(ffmpeg, [intro_video, current_video],
-                                  intro_merged, temp_dir):
-                    current_video = intro_merged
-                    logger.info(f"片頭已串接 ({intro_duration}s)")
-                else:
-                    logger.warning("TS 片頭 concat 失敗，嘗試直接 concat")
-                    if _concat_copy(ffmpeg, [intro_video, current_video],
-                                    intro_merged, temp_dir):
-                        current_video = intro_merged
-                        logger.info(f"片頭已串接 ({intro_duration}s, fallback)")
-                    else:
-                        logger.warning("片頭 concat 失敗，跳過片頭")
-            else:
+            if not create_image_video(intro_image, intro_video, intro_duration,
+                                      fade_duration, props,
+                                      skip_fade_in=True, skip_fade_out=True):
                 logger.warning("建立片頭影片失敗，繼續不加片頭")
+            else:
+                try:
+                    main_dur = _get_duration(current_video)
+                except RuntimeError as e:
+                    logger.error(f"無法取得影片時長: {e}")
+                    main_dur = 0
+
+                if main_dur > 0:
+                    # A1: 分割 head + rest
+                    head_seconds = min(fade_duration + 2.0, main_dur)
+                    head_path = os.path.join(temp_dir, "head.mp4")
+                    rest_path = os.path.join(temp_dir, "rest.mp4")
+
+                    head_cmd = [
+                        ffmpeg, "-y",
+                        "-i", current_video,
+                        "-t", str(head_seconds),
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-r", str(props["fps"]),
+                        head_path,
+                    ]
+                    rest_cmd = [
+                        ffmpeg, "-y",
+                        "-ss", str(head_seconds),
+                        "-i", current_video,
+                        "-c", "copy",
+                        "-avoid_negative_ts", "1",
+                        rest_path,
+                    ]
+                    r_head = subprocess.run(
+                        head_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=_SUBPROCESS_FLAGS,
+                    )
+                    r_rest = subprocess.run(
+                        rest_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        creationflags=_SUBPROCESS_FLAGS,
+                    )
+
+                    if r_head.returncode != 0 or r_rest.returncode != 0:
+                        logger.warning("分割 head/rest 失敗，跳過片頭")
+                    else:
+                        # A2: xfade intro + head
+                        xfade_offset = max(0.0, intro_duration - fade_duration)
+                        fc = (
+                            f"[0:v][1:v]xfade=transition=fade:duration={fade_duration}"
+                            f":offset={xfade_offset}[outv];"
+                            f"[0:a][1:a]acrossfade=d={fade_duration}"
+                            f":c1=qsin:c2=qsin[outa]"
+                        )
+                        intro_transition = os.path.join(temp_dir, "intro_transition.mp4")
+                        xfade_cmd = [
+                            ffmpeg, "-y",
+                            "-i", intro_video,
+                            "-i", head_path,
+                            "-filter_complex", fc,
+                            "-map", "[outv]", "-map", "[outa]",
+                            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                            "-c:a", "aac", "-b:a", "192k",
+                            "-r", str(props["fps"]),
+                            intro_transition,
+                        ]
+                        r_xfade = subprocess.run(
+                            xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            creationflags=_SUBPROCESS_FLAGS,
+                        )
+
+                        if r_xfade.returncode != 0:
+                            logger.warning("片頭 xfade 失敗，跳過片頭")
+                        else:
+                            # A3: concat intro_transition + rest（透過 TS）
+                            intro_merged = os.path.join(temp_dir, "intro_merged.mp4")
+                            if _concat_via_ts(ffmpeg, [intro_transition, rest_path],
+                                              intro_merged, temp_dir):
+                                current_video = intro_merged
+                                logger.info(f"片頭 cross dissolve 已套用 ({intro_duration}s)")
+                            else:
+                                logger.warning("片頭 concat 失敗，跳過片頭")
 
         # ── Phase B：Outro cross dissolve（Split Tail）────────────
         if outro_image and os.path.isfile(outro_image):
-            # B0: 建立 outro 影片（無 fade-in，xfade 會處理過渡）
+            # B0: 建立 outro 影片（無 fade-in/fade-out，xfade 處理進場，圖片維持到結束）
             outro_video = os.path.join(temp_dir, "outro.mp4")
             if not create_image_video(outro_image, outro_video, outro_duration,
-                                      fade_duration, props, skip_fade_in=True):
+                                      fade_duration, props,
+                                      skip_fade_in=True, skip_fade_out=True):
                 logger.warning("建立片尾影片失敗，降級為 concat 串接")
                 outro_fb = os.path.join(temp_dir, "outro_fb.mp4")
                 if create_image_video(outro_image, outro_fb, outro_duration,
