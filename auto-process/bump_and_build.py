@@ -16,8 +16,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
 DIST_EXE = os.path.join(SCRIPT_DIR, "dist", "AIEdit.exe")
-DESKTOP_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "課程影片處理工具")
-DESKTOP_EXE = os.path.join(DESKTOP_DIR, "AIEdit.exe")
+OUTPUT_EXE = os.path.join(REPO_ROOT, "AIEdit.exe")
 
 
 def bump_version():
@@ -63,9 +62,8 @@ def main():
 
     # Step 3: 複製 exe 到桌面發佈資料夾
     if os.path.isfile(DIST_EXE):
-        os.makedirs(DESKTOP_DIR, exist_ok=True)
-        shutil.copy2(DIST_EXE, DESKTOP_EXE)
-        print(f"✅ exe 已複製到 {DESKTOP_EXE}")
+        shutil.copy2(DIST_EXE, OUTPUT_EXE)
+        print(f"✅ exe 已複製到 {OUTPUT_EXE}")
     else:
         print(f"⚠️  找不到 {DIST_EXE}，跳過複製")
 
