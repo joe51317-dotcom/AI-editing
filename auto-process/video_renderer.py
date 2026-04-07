@@ -533,7 +533,26 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 logger.error("concat body+transition 失敗")
                 return None
 
-            shutil.move(output_path, video_path)
+            # B4: remux 修正時間戳（body 與 transition 的 timebase 不同，
+            #     concat demuxer 可能產生壓縮的 PTS，導致片尾定格）
+            fixed_path = os.path.join(temp_dir, "fixed.mp4")
+            fix_cmd = [
+                ffmpeg, "-y",
+                "-fflags", "+genpts",
+                "-i", output_path,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                fixed_path,
+            ]
+            r_fix = subprocess.run(
+                fix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+            if r_fix.returncode == 0:
+                shutil.move(fixed_path, video_path)
+            else:
+                logger.warning("PTS remux 失敗，使用未修正版本")
+                shutil.move(output_path, video_path)
             logger.info(f"片尾 cross dissolve 已套用 ({outro_duration}s, xfade={fade_duration}s)")
 
         else:
