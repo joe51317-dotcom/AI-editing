@@ -125,19 +125,27 @@ class ProcessWorker(threading.Thread):
         return output_paths or [video_path]
 
     def run(self):
-        for idx, video in enumerate(self.videos, start=1):
-            if self._stopped():
-                break
+        from video_renderer import register_stop_event as vr_register
+        from silence_detector import register_stop_event as sd_register
+        vr_register(self._stop_event)
+        sd_register(self._stop_event)
+        try:
+            for idx, video in enumerate(self.videos, start=1):
+                if self._stopped():
+                    break
 
-            video_path = video["path"]
-            video_title = video["title"]
-            filename = os.path.basename(video_path)
+                video_path = video["path"]
+                video_title = video["title"]
+                filename = os.path.basename(video_path)
 
-            try:
-                self._process_one(video_path, video_title, filename, idx)
-            except Exception as e:
-                logger.error(f"處理 {filename} 時發生錯誤: {e}")
-                self._send(filename, "error", text=str(e))
+                try:
+                    self._process_one(video_path, video_title, filename, idx)
+                except Exception as e:
+                    logger.error(f"處理 {filename} 時發生錯誤: {e}")
+                    self._send(filename, "error", text=str(e))
+        finally:
+            vr_register(None)
+            sd_register(None)
 
         # 全部完成
         self.queue.put({"type": "all_done"})

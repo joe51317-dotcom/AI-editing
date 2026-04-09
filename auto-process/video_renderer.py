@@ -24,6 +24,42 @@ _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 
 # 暫存目錄前綴，用於啟動時清理殘留
 _TEMP_PREFIX = "auto_process_render_"
 
+# ── 停止支援 ─────────────────────────────────────────────
+_stop_event = None
+
+
+def register_stop_event(event):
+    """由 ProcessWorker 在開始時呼叫，傳入 threading.Event 以支援中止。"""
+    global _stop_event
+    _stop_event = event
+
+
+def _is_stopped():
+    return _stop_event is not None and _stop_event.is_set()
+
+
+def _run_ffmpeg(cmd):
+    """subprocess.run 的可中斷版本。
+
+    每 0.5s 檢查一次 stop event，若已設定則 kill FFmpeg 子程序。
+    回傳 (returncode, stderr_bytes)。
+    停止時回傳 (-1, b'') 讓呼叫端可辨識為中止。
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=_SUBPROCESS_FLAGS,
+    )
+    while True:
+        try:
+            _, stderr = proc.communicate(timeout=0.5)
+            return proc.returncode, stderr
+        except subprocess.TimeoutExpired:
+            if _is_stopped():
+                proc.kill()
+                proc.wait()
+                logger.info("FFmpeg 已停止（使用者中止）")
+                return -1, b""
+
 
 def cleanup_stale_temp_dirs(max_age_hours=24):
     """
@@ -89,13 +125,12 @@ def render_video(source_video, kept_segments, output_path,
                 seg_filename,
             ]
 
-            result = subprocess.run(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_SUBPROCESS_FLAGS,
-            )
+            rc, stderr_bytes = _run_ffmpeg(cmd)
 
-            if result.returncode != 0:
-                stderr_text = result.stderr.decode(errors='replace')
+            if rc == -1:
+                return False  # 使用者中止
+            if rc != 0:
+                stderr_text = stderr_bytes.decode(errors='replace')
                 logger.error(f"切割片段 {i} 失敗: {stderr_text}")
                 if error_callback:
                     # 取 stderr 最後一行作為使用者可讀摘要
@@ -134,13 +169,12 @@ def render_video(source_video, kept_segments, output_path,
             output_path,
         ]
 
-        result = subprocess.run(
-            concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=_SUBPROCESS_FLAGS,
-        )
+        rc, stderr_bytes = _run_ffmpeg(concat_cmd)
 
-        if result.returncode != 0:
-            stderr_text = result.stderr.decode(errors='replace')
+        if rc == -1:
+            return False  # 使用者中止
+        if rc != 0:
+            stderr_text = stderr_bytes.decode(errors='replace')
             logger.error(f"合併失敗: {stderr_text}")
             if error_callback:
                 summary = stderr_text.strip().split('\n')[-1] if stderr_text.strip() else "未知錯誤"
@@ -215,12 +249,11 @@ def apply_audio_fade(video_path, fade_duration=1.0):
             "-af", af,
             out,
         ]
-        result = subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=_SUBPROCESS_FLAGS,
-        )
-        if result.returncode != 0:
-            logger.error(f"音頻淡入淡出失敗: {result.stderr.decode(errors='replace')}")
+        rc, stderr_bytes = _run_ffmpeg(cmd)
+        if rc == -1:
+            return False  # 使用者中止
+        if rc != 0:
+            logger.error(f"音頻淡入淡出失敗: {stderr_bytes.decode(errors='replace')}")
             return False
         shutil.move(out, video_path)
         logger.info(f"已套用音頻淡入淡出 ({fade_duration}s)")
@@ -311,6 +344,55 @@ def probe_video(video_path):
     return props
 
 
+def _find_keyframe_after(video_path, target_time, search_window=10):
+    """找到 target_time 之後最近的 keyframe 時間。
+
+    用於 stream copy 分割時確保 rest 從 keyframe 開始，
+    避免解碼器因缺少參考幀而定格。
+
+    Args:
+        video_path: 影片路徑
+        target_time: 目標時間（秒）
+        search_window: 從 target_time 往後搜尋的秒數
+
+    Returns:
+        float: 找到的 keyframe 時間（≥ target_time），找不到則回傳 target_time
+    """
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    start = max(0, target_time - 0.1)
+    cmd = [
+        ffprobe, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "packet=pts_time,flags",
+        "-of", "csv=p=0",
+        "-read_intervals", f"{start}%+{search_window}",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            creationflags=_SUBPROCESS_FLAGS)
+    if result.returncode != 0:
+        logger.warning(f"keyframe 偵測失敗，使用原始分割點 {target_time:.2f}s")
+        return target_time
+
+    for line in result.stdout.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) < 2:
+            continue
+        try:
+            pts = float(parts[0])
+        except ValueError:
+            continue
+        if 'K' in parts[1] and pts >= target_time - 0.01:
+            logger.info(f"Keyframe 分割: {target_time:.2f}s → {pts:.3f}s")
+            return pts
+
+    logger.warning(f"在 {search_window}s 內找不到 keyframe，使用原始分割點 {target_time:.2f}s")
+    return target_time
+
+
 def create_image_video(image_path, output_path, duration, fade_duration, video_props,
                        skip_fade_in=False, skip_fade_out=False):
     """
@@ -353,12 +435,11 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
         output_path,
     ]
 
-    result = subprocess.run(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        creationflags=_SUBPROCESS_FLAGS,
-    )
-    if result.returncode != 0:
-        logger.error(f"建立圖片影片失敗: {result.stderr.decode(errors='replace')}")
+    rc, stderr_bytes = _run_ffmpeg(cmd)
+    if rc == -1:
+        return False  # 使用者中止
+    if rc != 0:
+        logger.error(f"建立圖片影片失敗: {stderr_bytes.decode(errors='replace')}")
         return False
     return True
 
@@ -377,11 +458,8 @@ def _concat_copy(ffmpeg, file_list, output_path, temp_dir):
         "-c", "copy",
         output_path,
     ]
-    result = subprocess.run(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        creationflags=_SUBPROCESS_FLAGS,
-    )
-    return result.returncode == 0
+    rc, _ = _run_ffmpeg(cmd)
+    return rc == 0
 
 
 def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
@@ -403,12 +481,11 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
             "-f", "mpegts",
             ts_path,
         ]
-        r = subprocess.run(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            creationflags=_SUBPROCESS_FLAGS,
-        )
-        if r.returncode != 0:
-            logger.error(f"轉換 TS 失敗: {r.stderr.decode(errors='replace')}")
+        rc, stderr_bytes = _run_ffmpeg(cmd)
+        if rc == -1:
+            return False  # 使用者中止
+        if rc != 0:
+            logger.error(f"轉換 TS 失敗: {stderr_bytes.decode(errors='replace')}")
             return False
         ts_files.append(ts_path)
 
@@ -426,13 +503,10 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
         "-bsf:a", "aac_adtstoasc",
         output_path,
     ]
-    result = subprocess.run(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        creationflags=_SUBPROCESS_FLAGS,
-    )
-    if result.returncode != 0:
-        logger.error(f"TS concat 失敗: {result.stderr.decode(errors='replace')}")
-    return result.returncode == 0
+    rc, stderr_bytes = _run_ffmpeg(cmd)
+    if rc != 0 and rc != -1:
+        logger.error(f"TS concat 失敗: {stderr_bytes.decode(errors='replace')}")
+    return rc == 0
 
 
 def add_intro_outro(video_path, intro_image=None, outro_image=None,
@@ -485,39 +559,40 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
 
                 if main_dur > 0:
                     # A1: 分割 head + rest
+                    # 找到 head_seconds 之後最近的 keyframe，確保 rest
+                    # 從 keyframe 開始（stream copy 必須從 keyframe 才能正確解碼）
                     head_seconds = min(fade_duration + 2.0, main_dur)
+                    split_at = _find_keyframe_after(current_video, head_seconds)
                     head_path = os.path.join(temp_dir, "head.mp4")
                     rest_path = os.path.join(temp_dir, "rest.mp4")
 
+                    # head: 重新編碼到 split_at（keyframe 邊界）
                     head_cmd = [
                         ffmpeg, "-y",
                         "-i", current_video,
-                        "-t", str(head_seconds),
+                        "-t", str(split_at),
                         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
                         "-c:a", "aac", "-b:a", "192k",
                         "-r", str(props["fps"]),
                         head_path,
                     ]
-                    # output seeking: -ss 在 -i 之後，確保 rest 從 head_seconds
-                    # 之後的第一個 keyframe 開始（避免 input seeking 從前一個
-                    # keyframe 開始導致影片開頭重複）
+                    # rest: input seeking 到 keyframe 精確位置（-c copy 從 keyframe 開始）
                     rest_cmd = [
                         ffmpeg, "-y",
+                        "-ss", str(split_at),
                         "-i", current_video,
-                        "-ss", str(head_seconds),
                         "-c", "copy",
+                        "-avoid_negative_ts", "1",
                         rest_path,
                     ]
-                    r_head = subprocess.run(
-                        head_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        creationflags=_SUBPROCESS_FLAGS,
-                    )
-                    r_rest = subprocess.run(
-                        rest_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                        creationflags=_SUBPROCESS_FLAGS,
-                    )
+                    rc_head, _ = _run_ffmpeg(head_cmd)
+                    if rc_head == -1:
+                        return None  # 使用者中止
+                    rc_rest, _ = _run_ffmpeg(rest_cmd)
+                    if rc_rest == -1:
+                        return None  # 使用者中止
 
-                    if r_head.returncode != 0 or r_rest.returncode != 0:
+                    if rc_head != 0 or rc_rest != 0:
                         logger.warning("分割 head/rest 失敗，跳過片頭")
                     else:
                         # A2: xfade intro + head
@@ -540,12 +615,11 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                             "-r", str(props["fps"]),
                             intro_transition,
                         ]
-                        r_xfade = subprocess.run(
-                            xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            creationflags=_SUBPROCESS_FLAGS,
-                        )
+                        rc_xfade, _ = _run_ffmpeg(xfade_cmd)
+                        if rc_xfade == -1:
+                            return None  # 使用者中止
 
-                        if r_xfade.returncode != 0:
+                        if rc_xfade != 0:
                             logger.warning("片頭 xfade 失敗，跳過片頭")
                         else:
                             # A3: concat intro_transition + rest（透過 TS）
@@ -607,16 +681,14 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 tail_path,
             ]
 
-            r_body = subprocess.run(
-                body_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_SUBPROCESS_FLAGS,
-            )
-            r_tail = subprocess.run(
-                tail_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_SUBPROCESS_FLAGS,
-            )
+            rc_body, _ = _run_ffmpeg(body_cmd)
+            if rc_body == -1:
+                return None  # 使用者中止
+            rc_tail, _ = _run_ffmpeg(tail_cmd)
+            if rc_tail == -1:
+                return None  # 使用者中止
 
-            if r_body.returncode != 0 or r_tail.returncode != 0:
+            if rc_body != 0 or rc_tail != 0:
                 logger.error("分割 body/tail 失敗，降級為 concat 串接")
                 output_path = os.path.join(temp_dir, "output.mp4")
                 _concat_copy(ffmpeg, [current_video, outro_video],
@@ -650,12 +722,11 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 "-r", str(props["fps"]),
                 transition_path,
             ]
-            r_xfade = subprocess.run(
-                xfade_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                creationflags=_SUBPROCESS_FLAGS,
-            )
-            if r_xfade.returncode != 0:
-                stderr_text = r_xfade.stderr.decode(errors='replace')
+            rc_xfade, stderr_bytes = _run_ffmpeg(xfade_cmd)
+            if rc_xfade == -1:
+                return None  # 使用者中止
+            if rc_xfade != 0:
+                stderr_text = stderr_bytes.decode(errors='replace')
                 logger.error(f"xfade 失敗: {stderr_text}，降級為 concat 串接")
                 output_path = os.path.join(temp_dir, "output.mp4")
                 _concat_copy(ffmpeg, [current_video, outro_video],

@@ -14,6 +14,19 @@ logger = logging.getLogger(__name__)
 # Windows 下隱藏 FFmpeg console 視窗
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+# ── 停止支援 ─────────────────────────────────────────────
+_stop_event = None
+
+
+def register_stop_event(event):
+    """由 ProcessWorker 在開始時呼叫，傳入 threading.Event 以支援中止。"""
+    global _stop_event
+    _stop_event = event
+
+
+def _is_stopped():
+    return _stop_event is not None and _stop_event.is_set()
+
 
 def get_video_duration(video_path):
     """用 FFprobe 取得影片總長度（秒）"""
@@ -75,6 +88,12 @@ def detect_silence(video_path, noise_db=-30, min_duration=10,
     last_report = 0
     try:
         for raw_line in proc.stderr:
+            if _is_stopped():
+                proc.kill()
+                proc.wait()
+                logger.info("靜音偵測已停止（使用者中止）")
+                return []
+
             line = raw_line.decode("utf-8", errors="replace")
             stderr_lines.append(line)
 
@@ -149,6 +168,9 @@ def _extract_rms_windows(video_path, start_time, duration=30,
         "-f", "s16le",
         "pipe:1",
     ]
+    if _is_stopped():
+        return []
+
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              creationflags=_SUBPROCESS_FLAGS)
 
@@ -202,6 +224,8 @@ def find_speech_boundary(video_path, time_point, direction="forward",
         actual_lead = time_point - ss
         total_duration = actual_lead + search_duration
 
+        if _is_stopped():
+            return time_point
         rms_values = _extract_rms_windows(video_path, ss, total_duration,
                                           window_ms=window_ms)
         if not rms_values:
@@ -267,6 +291,8 @@ def find_speech_boundary(video_path, time_point, direction="forward",
         ss = max(0, time_point - search_duration)
         total_duration = search_duration + forward_check + baseline_skip + baseline_duration
 
+        if _is_stopped():
+            return time_point
         rms_values = _extract_rms_windows(video_path, ss, total_duration,
                                           window_ms=window_ms)
         if not rms_values:
