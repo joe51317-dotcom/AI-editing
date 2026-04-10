@@ -81,10 +81,128 @@ def cleanup_stale_temp_dirs(max_age_hours=24):
         logger.info(f"已清理 {cleaned} 個殘留暫存目錄")
 
 
+def _render_segment_smart(source_video, start, end, output_path, temp_dir, video_props):
+    """
+    Smart segment extraction：只在頭部做邊界重新編碼，其餘 stream copy。
+
+    H.264 stream copy 切割非 keyframe 位置時，B-frame 參考幀缺失導致頭部卡頓。
+    解法：只 re-encode 從 start 到下一個 keyframe 的「頭部」片段，
+    其餘維持 stream copy（快速）。尾部不 re-encode 避免重複幀問題。
+
+    - 若 start 已對齊 keyframe：直接 stream copy 整段（最快）
+    - 若 start 不在 keyframe：re-encode head + stream copy rest → TS concat
+
+    Returns:
+        True: 成功
+        False: 失敗
+        None: 使用者中止
+    """
+    ffmpeg = get_ffmpeg_path() or "ffmpeg"
+    fps = str(video_props["fps"])
+    pix_fmt = video_props.get("pix_fmt", "yuv420p")
+    timescale = video_props.get("timescale")
+    duration = end - start
+
+    kf_start = _find_keyframe_after(source_video, start)
+
+    # ── Case 1：start 已對齊 keyframe → 直接 stream copy ──────
+    if kf_start <= start + 0.001:
+        logger.info(f"  Start 已對齊 keyframe ({kf_start:.3f}s)，直接 stream copy")
+        cmd = [
+            ffmpeg, "-y",
+            "-ss", str(start),
+            "-t", str(duration),
+            "-i", source_video,
+            "-c", "copy",
+            # 注意：不加 -avoid_negative_ts，從 keyframe seek 無負 DTS 問題，
+            # 加了反而會偏移 PTS（start_time 從 0 變成 0.066s）
+            output_path,
+        ]
+        rc, stderr = _run_ffmpeg(cmd)
+        if rc == -1:
+            return None
+        if rc != 0:
+            logger.error(f"Stream copy 失敗: {stderr.decode(errors='replace')[:200]}")
+            return False
+        return True
+
+    # ── Case 2：start 不在 keyframe → head re-encode + rest stream copy ──
+    # 短片段（整段在一個 GOP 內）→ 整段 re-encode（output seeking 精確）
+    if kf_start >= end - 0.001:
+        logger.info(f"  短片段（< 1 GOP），整段重新編碼: {start:.3f}s → {end:.3f}s")
+        cmd = [
+            ffmpeg, "-y",
+            "-i", source_video,
+            "-ss", str(start), "-to", str(end),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", pix_fmt,
+            "-bf", "0",  # 禁用 B-frames：避免負 DTS pre-roll 造成 start_time 偏移
+            "-r", fps,
+            "-c:a", "aac", "-b:a", "192k",
+        ]
+        if timescale:
+            cmd += ["-video_track_timescale", str(timescale)]
+        cmd.append(output_path)
+        rc, stderr = _run_ffmpeg(cmd)
+        if rc == -1:
+            return None
+        if rc != 0:
+            logger.error(f"短片段 re-encode 失敗: {stderr.decode(errors='replace')[:200]}")
+            return False
+        return True
+
+    sub_temp = tempfile.mkdtemp(dir=temp_dir, prefix="smart_")
+
+    # ── Head：output seeking re-encode（start → kf_start），精確到幀 ──
+    head_path = os.path.join(sub_temp, "head.mp4")
+    head_cmd = [
+        ffmpeg, "-y",
+        "-i", source_video,
+        "-ss", str(start), "-to", str(kf_start),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", pix_fmt,
+        "-bf", "0",  # 禁用 B-frames：避免負 DTS pre-roll 造成 start_time 偏移
+        "-r", fps,
+        "-c:a", "aac", "-b:a", "192k",
+    ]
+    if timescale:
+        head_cmd += ["-video_track_timescale", str(timescale)]
+    head_cmd.append(head_path)
+
+    rc, stderr = _run_ffmpeg(head_cmd)
+    if rc == -1:
+        return None
+    if rc != 0:
+        logger.error(f"Head re-encode 失敗: {stderr.decode(errors='replace')[:200]}")
+        return False
+    logger.info(f"  Head re-encode: {start:.3f}s → {kf_start:.3f}s")
+
+    # ── Rest：input seeking stream copy（kf_start → end），快速 ──
+    rest_path = os.path.join(sub_temp, "rest.mp4")
+    rest_duration = end - kf_start
+    rest_cmd = [
+        ffmpeg, "-y",
+        "-ss", str(kf_start),
+        "-t", str(rest_duration),
+        "-i", source_video,
+        "-c", "copy",
+        # 不加 -avoid_negative_ts：從 keyframe seek，無負 DTS 問題
+        rest_path,
+    ]
+    rc, stderr = _run_ffmpeg(rest_cmd)
+    if rc == -1:
+        return None
+    if rc != 0:
+        logger.error(f"Rest stream copy 失敗: {stderr.decode(errors='replace')[:200]}")
+        return False
+    logger.info(f"  Rest stream copy: {kf_start:.3f}s → {end:.3f}s ({rest_duration:.1f}s)")
+
+    # ── Concat head + rest via TS（統一 timebase）──────────────
+    return _concat_via_ts(ffmpeg, [head_path, rest_path], output_path, sub_temp)
+
+
 def render_video(source_video, kept_segments, output_path,
                  progress_callback=None, error_callback=None):
     """
-    用 FFmpeg stream copy 切割並合併影片片段（無重新編碼，速度快）。
+    裁剪並合併影片片段（邊界重新編碼確保無卡頓，中間 stream copy 保持速度）。
 
     Args:
         source_video: 來源影片路徑
@@ -96,14 +214,25 @@ def render_video(source_video, kept_segments, output_path,
     Returns:
         bool: 成功與否
     """
-    logger.info("開始無損裁剪 (Stream Copy)...")
+    logger.info("開始裁剪（邊界重新編碼 + 中間 stream copy）...")
 
     temp_dir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
     segment_files = []
 
     try:
-        # 1. 逐 segment 切割
+        # 取得影片屬性（供邊界重新編碼使用）
+        video_props = probe_video(source_video)
+        if not video_props:
+            logger.error("無法取得影片屬性")
+            if error_callback:
+                error_callback("無法偵測影片屬性")
+            return False
+
+        # 1. 逐 segment 切割（smart 邊界重新編碼）
         for i, segment in enumerate(kept_segments):
+            if _is_stopped():
+                return False
+
             start = segment["start"]
             end = segment["end"]
             duration = end - start
@@ -113,29 +242,16 @@ def render_video(source_video, kept_segments, output_path,
 
             seg_filename = os.path.join(temp_dir, f"seg_{i:04d}.mp4")
 
-            ffmpeg = get_ffmpeg_path() or "ffmpeg"
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-ss", str(start),
-                "-t", str(duration),
-                "-i", source_video,
-                "-c", "copy",
-                "-avoid_negative_ts", "1",
-                seg_filename,
-            ]
+            result = _render_segment_smart(
+                source_video, start, end, seg_filename, temp_dir, video_props
+            )
 
-            rc, stderr_bytes = _run_ffmpeg(cmd)
-
-            if rc == -1:
+            if result is None:
                 return False  # 使用者中止
-            if rc != 0:
-                stderr_text = stderr_bytes.decode(errors='replace')
-                logger.error(f"切割片段 {i} 失敗: {stderr_text}")
+            if not result:
+                logger.error(f"切割片段 {i} 失敗")
                 if error_callback:
-                    # 取 stderr 最後一行作為使用者可讀摘要
-                    summary = stderr_text.strip().split('\n')[-1] if stderr_text.strip() else "未知錯誤"
-                    error_callback(f"片段 {i+1} 切割失敗: {summary}")
+                    error_callback(f"片段 {i+1} 切割失敗")
                 continue
 
             segment_files.append(seg_filename)
@@ -147,38 +263,29 @@ def render_video(source_video, kept_segments, output_path,
             logger.warning("沒有保留的片段，跳過裁剪。")
             return False
 
-        # 2. Concat demuxer 合併
+        # 2. 合併所有片段（TS 中間格式避免 PTS 不連續）
         logger.info(f"合併 {len(segment_files)} 個片段...")
-
-        list_path = os.path.join(temp_dir, "mylist.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for seg in segment_files:
-                safe_path = seg.replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{safe_path}'\n")
-
         if progress_callback:
             progress_callback("merging", 0, 1)
 
-        concat_cmd = [
-            get_ffmpeg_path() or "ffmpeg",
-            "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", list_path,
-            "-c", "copy",
-            output_path,
-        ]
+        ffmpeg = get_ffmpeg_path() or "ffmpeg"
 
-        rc, stderr_bytes = _run_ffmpeg(concat_cmd)
+        if len(segment_files) == 1:
+            shutil.move(segment_files[0], output_path)
+            logger.info(f"裁剪完成（單片段）: {output_path}")
+            return True
 
-        if rc == -1:
-            return False  # 使用者中止
-        if rc != 0:
-            stderr_text = stderr_bytes.decode(errors='replace')
-            logger.error(f"合併失敗: {stderr_text}")
+        success = _concat_via_ts(ffmpeg, segment_files, output_path, temp_dir)
+        if not success:
+            if _is_stopped():
+                return False
+            logger.warning("TS concat 失敗，嘗試 concat demuxer")
+            success = _concat_copy(ffmpeg, segment_files, output_path, temp_dir)
+
+        if not success:
+            logger.error("合併失敗")
             if error_callback:
-                summary = stderr_text.strip().split('\n')[-1] if stderr_text.strip() else "未知錯誤"
-                error_callback(f"合併失敗: {summary}")
+                error_callback("合併失敗")
             return False
 
         logger.info(f"裁剪完成: {output_path}")
@@ -393,6 +500,59 @@ def _find_keyframe_after(video_path, target_time, search_window=10):
     return target_time
 
 
+def _find_keyframe_before(video_path, target_time, search_window=10):
+    """找到 target_time 之前最近的 keyframe 時間。
+
+    用於 stream copy 分割時確保 body 在 keyframe 結束，
+    避免接合處的時間戳不連續。
+
+    Args:
+        video_path: 影片路徑
+        target_time: 目標時間（秒）
+        search_window: 從 target_time 往前搜尋的秒數
+
+    Returns:
+        float: 找到的 keyframe 時間（≤ target_time），找不到則回傳 target_time
+    """
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    start = max(0, target_time - search_window)
+    cmd = [
+        ffprobe, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "packet=pts_time,flags",
+        "-of", "csv=p=0",
+        "-read_intervals", f"{start}%+{search_window + 1}",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            creationflags=_SUBPROCESS_FLAGS)
+    if result.returncode != 0:
+        logger.warning(f"keyframe 偵測失敗，使用原始分割點 {target_time:.2f}s")
+        return target_time
+
+    best = None
+    for line in result.stdout.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) < 2:
+            continue
+        try:
+            pts = float(parts[0])
+        except ValueError:
+            continue
+        if 'K' in parts[1] and pts <= target_time + 0.01:
+            best = pts
+
+    if best is not None:
+        logger.info(f"Keyframe 分割 (before): {target_time:.2f}s → {best:.3f}s")
+        return best
+
+    logger.warning(f"在 {search_window}s 內找不到 keyframe，使用原始分割點 {target_time:.2f}s")
+    return target_time
+
+
 def create_image_video(image_path, output_path, duration, fade_duration, video_props,
                        skip_fade_in=False, skip_fade_out=False):
     """
@@ -428,6 +588,7 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
         "-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl={cl}",
         "-vf", vf,
         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-bf", "0",   # 禁用 B-frames：避免負 DTS pre-roll，確保 start_time=0
         "-c:a", "aac", "-b:a", "128k",
         "-r", str(fps),
         "-t", str(duration),
@@ -442,6 +603,54 @@ def create_image_video(image_path, output_path, duration, fade_duration, video_p
         logger.error(f"建立圖片影片失敗: {stderr_bytes.decode(errors='replace')}")
         return False
     return True
+
+
+def _get_raw_first_keyframe_pts(video_path):
+    """取得影片第一個 keyframe 的原始 PTS（不受 MP4 edit list 影響）。
+
+    用於 _concat_via_ts 計算正確的 ts_offset：
+    stream-copied 片段的 raw PTS 不一定從 0 開始，
+    必須用 target_start - raw_first_keyframe_pts 補償偏移。
+
+    Returns:
+        float: 第一個 keyframe 的 pts_time，失敗時回傳 0.0
+    """
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    cmd = [
+        ffprobe, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time,flags",
+        "-read_intervals", "%+#30",  # 讀前 30 個封包，足以找到第一個 keyframe
+        "-of", "csv=p=0",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            creationflags=_SUBPROCESS_FLAGS)
+    if result.returncode != 0:
+        logger.warning(f"無法探測 raw keyframe PTS: {video_path}，使用 0.0")
+        return 0.0
+
+    for line in result.stdout.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) < 2:
+            continue
+        pts_str = parts[0]
+        flags = parts[1] if len(parts) > 1 else ""
+        if 'K' not in flags:
+            continue
+        if pts_str in ('N/A', 'n/a', ''):
+            continue
+        try:
+            return float(pts_str)
+        except ValueError:
+            continue
+
+    logger.warning(f"找不到 keyframe PTS: {video_path}，使用 0.0")
+    return 0.0
 
 
 def _concat_copy(ffmpeg, file_list, output_path, temp_dir):
@@ -468,16 +677,40 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
     MP4 concat demuxer 在混合 stream-copied 和 re-encoded 段落時，
     timebase 映射可能破壞 B-frame 的 PTS 順序。TS 使用固定 90kHz 時鐘，
     能統一所有段落的時間基準，避免 PTS 錯誤。
+
+    ts_offset 補償說明：
+    - target_start：此 segment 在輸出中的目標起始時間（edit-list 層面）
+    - raw_first_kf_pts：此 segment raw 第一個 keyframe 的 PTS（不受 edit list 影響）
+    - ts_offset = target_start - raw_first_kf_pts
+    - 效果：將 raw PTS 空間「平移」，使第一個 keyframe 正好落在 target_start
+    - 對 re-encoded 檔案（raw PTS ≈ 0）：ts_offset ≈ target_start（與原本相同）
+    - 對 stream-copied 檔案（raw PTS ≈ split_point）：正確補償偏移
     """
     ts_files = []
+    target_start = 0.0  # 此 segment 在輸出中的目標起始時間
     for i, fp in enumerate(file_list):
         ts_path = os.path.join(temp_dir, f"seg_{i}.ts")
+
+        if i == 0:
+            # 第一個 segment：固定從 0 開始，不做 raw PTS 補償
+            # （補償會讓 B-frame pre-roll DTS 更負，造成 MPEG-TS 問題）
+            ts_offset = 0.0
+            raw_first_kf_pts = 0.0
+        else:
+            # 後續 segment：探測 raw 第一個 keyframe PTS（繞過 MP4 edit list）
+            # 補償偏移，確保第一幀落在 target_start（前一 segment 的播放結束點）
+            raw_first_kf_pts = _get_raw_first_keyframe_pts(fp)
+            ts_offset = target_start - raw_first_kf_pts
+        logger.debug(f"  TS seg {i}: target={target_start:.3f}s, "
+                     f"raw_kf_pts={raw_first_kf_pts:.3f}s, ts_offset={ts_offset:.3f}s")
+
         cmd = [
             ffmpeg, "-y",
             "-i", fp,
+            "-output_ts_offset", str(ts_offset),   # 強制此 segment 從 target_start 開始
             "-c:v", "copy",
             "-bsf:v", "h264_mp4toannexb",
-            "-c:a", "aac", "-b:a", "192k",   # 統一音頻為 AAC（TS 不支援 pcm_f32le 等格式）
+            "-c:a", "aac", "-b:a", "192k",
             "-f", "mpegts",
             ts_path,
         ]
@@ -488,19 +721,24 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
             logger.error(f"轉換 TS 失敗: {stderr_bytes.decode(errors='replace')}")
             return False
         ts_files.append(ts_path)
+        # 累加此 segment 的「播放時長」（edit-list 層面），作為下個 segment 的目標起始時間
+        try:
+            target_start += _get_duration(fp)
+        except Exception:
+            pass
 
-    list_path = os.path.join(temp_dir, f"concat_ts_{os.path.basename(output_path)}.txt")
-    with open(list_path, "w", encoding="utf-8") as f:
-        for tp in ts_files:
-            safe = tp.replace("\\", "/").replace("'", "'\\''")
-            f.write(f"file '{safe}'\n")
-
+    # 用 concat protocol 串接時間戳已對齊的 TS byte stream
+    concat_input = "concat:" + "|".join(
+        tp.replace("\\", "/") for tp in ts_files
+    )
     cmd = [
         ffmpeg, "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", list_path,
+        "-i", concat_input,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
+        # make_zero：把 B-frame pre-roll 的微小負 DTS 歸零，確保 start_time=0.000
+        # 此處作用於整個 TS timeline，不影響各 segment 間的相對位置（安全）
+        "-avoid_negative_ts", "make_zero",
         output_path,
     ]
     rc, stderr_bytes = _run_ffmpeg(cmd)
@@ -572,17 +810,19 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                         "-i", current_video,
                         "-t", str(split_at),
                         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                        "-bf", "0",  # 禁用 B-frames，確保 start_time=0
                         "-c:a", "aac", "-b:a", "192k",
                         "-r", str(props["fps"]),
                         head_path,
                     ]
                     # rest: input seeking 到 keyframe 精確位置（-c copy 從 keyframe 開始）
+                    # 不加 -avoid_negative_ts：從 keyframe seek 無負 DTS，
+                    # 加了反而把 PTS 偏移 ~66ms，TS concat 時產生空隙卡頓
                     rest_cmd = [
                         ffmpeg, "-y",
                         "-ss", str(split_at),
                         "-i", current_video,
                         "-c", "copy",
-                        "-avoid_negative_ts", "1",
                         rest_path,
                     ]
                     rc_head, _ = _run_ffmpeg(head_cmd)
@@ -611,6 +851,7 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                             "-filter_complex", fc,
                             "-map", "[outv]", "-map", "[outa]",
                             "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                            "-bf", "0",  # 禁用 B-frames，確保 start_time=0
                             "-c:a", "aac", "-b:a", "192k",
                             "-r", str(props["fps"]),
                             intro_transition,
@@ -654,28 +895,30 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 logger.error(f"無法取得影片時長: {e}")
                 return None
 
-            # B1: 分割 body + tail
+            # B1: 分割 body + tail（keyframe 對齊，確保 body 乾淨結尾）
             tail_seconds = min(fade_duration + 2.0, main_dur)
             body_end = main_dur - tail_seconds
+            split_at = _find_keyframe_before(current_video, body_end)
 
             body_path = os.path.join(temp_dir, "body.mp4")
             tail_path = os.path.join(temp_dir, "tail.mp4")
 
-            # body: -c copy（快速）
+            # body: -c copy 到 keyframe（快速，乾淨結尾）
+            # 不加 -avoid_negative_ts：current_video 從 PTS=0 開始，無需偏移調整
             body_cmd = [
                 ffmpeg, "-y",
                 "-i", current_video,
-                "-t", str(body_end),
+                "-t", str(split_at),
                 "-c", "copy",
-                "-avoid_negative_ts", "1",
                 body_path,
             ]
-            # tail: 重新編碼（只有幾秒，極快）
+            # tail: 從同一 keyframe 重新編碼（只有幾秒，極快）
             tail_cmd = [
                 ffmpeg, "-y",
-                "-ss", str(body_end),
+                "-ss", str(split_at),
                 "-i", current_video,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-bf", "0",  # 禁用 B-frames，確保 start_time=0
                 "-c:a", "aac", "-b:a", "128k",
                 "-r", str(props["fps"]),
                 tail_path,
@@ -718,6 +961,7 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
                 "-filter_complex", fc,
                 "-map", "[outv]", "-map", "[outa]",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-bf", "0",  # 禁用 B-frames，確保 start_time=0
                 "-c:a", "aac", "-b:a", "128k",
                 "-r", str(props["fps"]),
                 transition_path,
