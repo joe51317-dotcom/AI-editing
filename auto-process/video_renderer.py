@@ -653,48 +653,93 @@ def _get_raw_first_keyframe_pts(video_path):
     return 0.0
 
 
-_nvenc_available = None  # 快取，避免每次呼叫都執行 ffmpeg
+_hw_encoder_cache = None  # 快取偵測結果："nvenc" | "qsv" | "cpu"
 
 
-def _check_nvenc(ffmpeg):
-    """偵測 h264_nvenc 是否可用（第一次呼叫時快取結果）。"""
-    global _nvenc_available
-    if _nvenc_available is not None:
-        return _nvenc_available
-    try:
-        result = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True, text=True,
-            creationflags=_SUBPROCESS_FLAGS, timeout=10,
-        )
-        _nvenc_available = "h264_nvenc" in result.stdout
-    except Exception:
-        _nvenc_available = False
-    if _nvenc_available:
-        logger.info("NVENC 可用，使用 GPU 加速編碼")
-    else:
-        logger.info("NVENC 不可用，使用 CPU 編碼（libx264）")
-    return _nvenc_available
+def _probe_hw_encoder(ffmpeg):
+    """用 0.1 秒 null-output test encode 確認哪個編碼器實際可用。
+
+    只查 -encoders 是不夠的：NVENC driver 版本不符時仍會出現在列表，
+    但實際呼叫時才報錯。只有真正跑一次 encode 才能確認。
+    """
+    global _hw_encoder_cache
+    if _hw_encoder_cache is not None:
+        return _hw_encoder_cache
+
+    # 0.1 秒的 null 輸入 test encode，不需要真實影片檔案
+    base_cmd = [
+        ffmpeg, "-y",
+        "-f", "lavfi", "-i", "nullsrc=s=640x360:r=30:d=0.1",
+        "-f", "lavfi", "-i", "aevalsrc=0:r=48000:d=0.1",
+    ]
+
+    candidates = [
+        ("nvenc", [
+            "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+            "-rc", "vbr", "-cq", "20", "-b:v", "0", "-bf", "0",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-f", "null", "-",
+        ]),
+        ("qsv", [
+            "-c:v", "h264_qsv", "-preset", "faster", "-global_quality", "20",
+            "-bf", "0", "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-f", "null", "-",
+        ]),
+    ]
+
+    for name, enc_args in candidates:
+        try:
+            r = subprocess.run(
+                base_cmd + enc_args,
+                capture_output=True, timeout=15,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+            if r.returncode == 0:
+                logger.info(f"硬體加速可用：{name.upper()}，使用 GPU 加速編碼")
+                _hw_encoder_cache = name
+                return name
+            else:
+                logger.debug(f"{name.upper()} test 失敗 (rc={r.returncode})，嘗試下一個")
+        except Exception as e:
+            logger.debug(f"{name.upper()} test 異常: {e}，嘗試下一個")
+
+    logger.info("無可用硬體加速，使用 CPU 編碼（libx264 ultrafast）")
+    _hw_encoder_cache = "cpu"
+    return "cpu"
 
 
 def _build_video_encode_args(ffmpeg, pix_fmt="yuv420p"):
-    """回傳影片編碼參數，優先 NVENC，不可用則 libx264。"""
-    if _check_nvenc(ffmpeg):
-        # NVENC：VBR 恆定品質模式，-cq 18 ≈ libx264 -crf 18，bf=0 確保 closed GOP
+    """回傳影片編碼參數：NVENC > QSV > libx264 ultrafast。
+
+    使用 test-encode 偵測，確保只在驅動/硬體實際支援時才使用 GPU 編碼器。
+    CPU fallback 改用 ultrafast（速度約 4-6x 快於 fast，檔案稍大但課程影片可接受）。
+    """
+    enc = _probe_hw_encoder(ffmpeg)
+    if enc == "nvenc":
         return [
             "-c:v", "h264_nvenc",
-            "-preset", "p4",           # balanced quality/speed
+            "-preset", "p4",
             "-tune", "hq",
             "-rc", "vbr",
             "-cq", "18",
-            "-b:v", "0",               # 不設上限，由 cq 控制
-            "-bf", "0",                # closed GOP，無 B-frame pre-roll
+            "-b:v", "0",
+            "-bf", "0",
+            "-pix_fmt", pix_fmt,
+        ]
+    elif enc == "qsv":
+        return [
+            "-c:v", "h264_qsv",
+            "-preset", "faster",
+            "-global_quality", "18",
+            "-bf", "0",
             "-pix_fmt", pix_fmt,
         ]
     else:
         return [
             "-c:v", "libx264",
-            "-preset", "fast",
+            "-preset", "ultrafast",   # ~4-6x 快於 fast，課程影片可接受
             "-crf", "18",
             "-pix_fmt", pix_fmt,
             "-bf", "0",
