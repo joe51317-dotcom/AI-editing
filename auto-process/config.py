@@ -43,7 +43,7 @@ FAILED_DIR = _resolve(os.getenv("FAILED_DIR", "./auto-process/failed"))
 LOG_DIR = _resolve(os.getenv("LOG_DIR", "./auto-process/logs"))
 
 # --- 應用程式 ---
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 
 # --- 支援的影片格式 ---
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".mts", ".m4v"}
