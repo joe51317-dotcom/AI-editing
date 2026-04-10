@@ -653,6 +653,54 @@ def _get_raw_first_keyframe_pts(video_path):
     return 0.0
 
 
+_nvenc_available = None  # 快取，避免每次呼叫都執行 ffmpeg
+
+
+def _check_nvenc(ffmpeg):
+    """偵測 h264_nvenc 是否可用（第一次呼叫時快取結果）。"""
+    global _nvenc_available
+    if _nvenc_available is not None:
+        return _nvenc_available
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True, text=True,
+            creationflags=_SUBPROCESS_FLAGS, timeout=10,
+        )
+        _nvenc_available = "h264_nvenc" in result.stdout
+    except Exception:
+        _nvenc_available = False
+    if _nvenc_available:
+        logger.info("NVENC 可用，使用 GPU 加速編碼")
+    else:
+        logger.info("NVENC 不可用，使用 CPU 編碼（libx264）")
+    return _nvenc_available
+
+
+def _build_video_encode_args(ffmpeg, pix_fmt="yuv420p"):
+    """回傳影片編碼參數，優先 NVENC，不可用則 libx264。"""
+    if _check_nvenc(ffmpeg):
+        # NVENC：VBR 恆定品質模式，-cq 18 ≈ libx264 -crf 18，bf=0 確保 closed GOP
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",           # balanced quality/speed
+            "-tune", "hq",
+            "-rc", "vbr",
+            "-cq", "18",
+            "-b:v", "0",               # 不設上限，由 cq 控制
+            "-bf", "0",                # closed GOP，無 B-frame pre-roll
+            "-pix_fmt", pix_fmt,
+        ]
+    else:
+        return [
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", pix_fmt,
+            "-bf", "0",
+        ]
+
+
 def _concat_copy(ffmpeg, file_list, output_path, temp_dir):
     """用 concat demuxer (-c copy) 快速串接多個影片檔案。"""
     list_path = os.path.join(temp_dir, f"concat_{os.path.basename(output_path)}.txt")
@@ -876,16 +924,18 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
         map_a = f"[{cur_a}]"
 
         # ── 單次 ffmpeg 呼叫，無任何 stream copy 或 concat ─────
+        # 優先使用 NVENC GPU 編碼（~5-10x 快於 CPU），fallback libx264
         output_path = os.path.join(temp_dir, "output.mp4")
+        vid_enc_args = _build_video_encode_args(ffmpeg)
         cmd = [ffmpeg, "-y"]
         for inp in inputs:
             cmd += ["-i", inp]
         cmd += [
             "-filter_complex", fc,
             "-map", map_v, "-map", map_a,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-bf", "0",           # closed GOP，確保後續工具安全處理
+        ]
+        cmd += vid_enc_args
+        cmd += [
             "-c:a", "aac", "-b:a", "192k",
             "-r", str(props["fps"]),
             "-movflags", "+faststart",
