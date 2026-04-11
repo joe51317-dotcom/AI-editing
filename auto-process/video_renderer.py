@@ -840,21 +840,13 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
     return rc == 0
 
 
-def add_intro_outro(video_path, intro_image=None, outro_image=None,
-                    intro_duration=3, outro_duration=3, fade_duration=0.5):
+def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
+                              intro_duration=3, outro_duration=3, fade_duration=0.5):
     """
-    為影片加上片頭/片尾圖片 — 單次 filter_complex 全片重新編碼。
+    Fallback：單次 filter_complex 全片重新編碼（慢但萬無一失）。
 
-    舊版「split head/tail + stream copy rest/body + TS concat」策略在
-    open GOP 來源（iPhone / 現代相機）必然產生孤兒 B-frame 參考，
-    導致 DTS 碰撞和 PTS 回跳（已由 ffprobe 封包級分析證實）。
-
-    本版拋棄所有 stream copy 和 concat，改為單次 filter_complex：
-    - 無 split、無 stream copy、無 TS concat
-    - intro / content / outro 在同一 decoder context 中處理
-    - 輸出 closed GOP（-bf 0），後續操作安全
-
-    不處理音頻淡入淡出（由呼叫端另行呼叫 apply_audio_fade）。
+    在 open GOP 來源無法用 concat demuxer 時使用。
+    所有段落在同一 decoder context 中做 xfade，輸出 closed GOP。
 
     Args:
         video_path: 裁剪後的影片路徑（成功時會被覆蓋）
@@ -1011,3 +1003,284 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
             shutil.rmtree(temp_dir)
         except OSError:
             pass
+
+
+# ── 新架構：hardcut + 音訊平滑過渡（主路徑）─────────────────────────────────
+
+def _probe_h264_params(video_path):
+    """探測來源影片的 H.264 codec params，用於生成 SPS-compatible 的 intro/outro。
+
+    Returns:
+        dict | None: {'codec_name', 'profile', 'level', 'pix_fmt',
+                      'has_b_frames', 'sar'}
+    """
+    ffprobe = get_ffprobe_path() or "ffprobe"
+    cmd = [
+        ffprobe, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries",
+        "stream=codec_name,profile,level,pix_fmt,has_b_frames,sample_aspect_ratio",
+        "-of", "json",
+        video_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, creationflags=_SUBPROCESS_FLAGS)
+    if r.returncode != 0:
+        return None
+    try:
+        s = json.loads(r.stdout)["streams"][0]
+        return {
+            "codec_name": s.get("codec_name", "h264"),
+            "profile": s.get("profile", "High"),
+            "level": s.get("level", 40),
+            "pix_fmt": s.get("pix_fmt", "yuv420p"),
+            "has_b_frames": int(s.get("has_b_frames", 0)),
+            "sar": s.get("sample_aspect_ratio", "1:1"),
+        }
+    except (json.JSONDecodeError, KeyError, IndexError, ValueError):
+        return None
+
+
+def _build_static_image_video(ffmpeg, image_path, output_mp4,
+                               duration, props, h264_params,
+                               fade_in_from_black=False,
+                               fade_out_to_black=False,
+                               fade_duration=0.5):
+    """生成靜態圖片影片，codec params 匹配 content 的 SPS 以便 concat stream copy。
+
+    Args:
+        fade_in_from_black: 片頭淡入（用於 intro）
+        fade_out_to_black:  片尾淡出（用於 outro）
+    """
+    w, h = props["width"], props["height"]
+    fps = props["fps"]
+    sample_rate = props.get("audio_sample_rate") or 48000
+    channels = props.get("audio_channels") or 2
+    cl = "stereo" if channels >= 2 else "mono"
+    pix_fmt = h264_params.get("pix_fmt", "yuv420p")
+
+    vf_parts = [
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+    ]
+    if fade_in_from_black and fade_duration > 0:
+        vf_parts.append(f"fade=t=in:st=0:d={fade_duration}")
+    if fade_out_to_black and fade_duration > 0:
+        fade_start = max(0.0, duration - fade_duration)
+        vf_parts.append(f"fade=t=out:st={fade_start}:d={fade_duration}")
+    vf_parts.append(f"format={pix_fmt}")
+    vf = ",".join(vf_parts)
+
+    # profile 轉換（ffprobe: "High"/"Main"；libx264: "high"/"main"）
+    profile_raw = h264_params.get("profile", "High").lower().replace(" ", "")
+    profile_map = {
+        "high": "high", "main": "main", "baseline": "baseline",
+        "constrainedbaseline": "baseline", "high444predictive": "high444",
+    }
+    profile = profile_map.get(profile_raw, "high")
+    level_int = h264_params.get("level", 40)
+    level_str = f"{level_int // 10}.{level_int % 10}"
+    bf = max(0, h264_params.get("has_b_frames", 0))
+
+    cmd = [
+        ffmpeg, "-y",
+        "-loop", "1", "-t", str(duration), "-i", image_path,
+        "-f", "lavfi", "-t", str(duration),
+        "-i", f"anullsrc=r={sample_rate}:cl={cl}",
+        "-vf", vf,
+        "-c:v", "libx264",
+        "-profile:v", profile,
+        "-level", level_str,
+        "-pix_fmt", pix_fmt,
+        "-bf", str(bf),
+        "-preset", "fast", "-crf", "18",
+        "-r", str(fps),
+        "-c:a", "aac", "-b:a", "128k",
+        "-ar", str(sample_rate),
+        "-ac", str(channels),
+        "-shortest",
+        output_mp4,
+    ]
+    rc, stderr = _run_ffmpeg(cmd)
+    if rc != 0:
+        logger.error(f"生成靜態影片失敗: {stderr.decode(errors='replace')[:500]}")
+        return False
+    return True
+
+
+def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
+                             intro_duration, outro_duration, fade_duration):
+    """硬切 concat + 音訊平滑過渡（主路徑）。
+
+    video 完全 stream copy（content 從未被解碼），音訊在 concat pass 中
+    以 afade 做淡入淡出。避免任何對 content 的 split，繞開 open GOP
+    孤兒 B-frame 問題。
+
+    Returns:
+        str | None: 成功回傳 video_path，失敗回傳 None（觸發 fallback）
+    """
+    has_intro = bool(intro_image and os.path.isfile(intro_image))
+    has_outro = bool(outro_image and os.path.isfile(outro_image))
+    if not has_intro and not has_outro:
+        return video_path
+
+    props = probe_video(video_path)
+    h264_params = _probe_h264_params(video_path)
+    if not props or not h264_params:
+        logger.warning("hardcut: 無法探測影片參數，fallback")
+        return None
+
+    # 罕見 pix_fmt（10-bit HDR 等）直接 fallback
+    if h264_params["pix_fmt"] not in ("yuv420p", "yuvj420p"):
+        logger.info(
+            f"hardcut: 不支援 pix_fmt={h264_params['pix_fmt']}，fallback"
+        )
+        return None
+
+    try:
+        content_dur = _get_duration(video_path)
+    except RuntimeError as e:
+        logger.error(f"hardcut: 無法取得影片時長: {e}")
+        return None
+
+    ffmpeg = get_ffmpeg_path() or "ffmpeg"
+    temp_dir = tempfile.mkdtemp(prefix=_TEMP_PREFIX)
+
+    try:
+        intro_mp4 = os.path.join(temp_dir, "intro.mp4") if has_intro else None
+        outro_mp4 = os.path.join(temp_dir, "outro.mp4") if has_outro else None
+        output_mp4 = os.path.join(temp_dir, "output.mp4")
+        concat_list_path = os.path.join(temp_dir, "concat.txt")
+
+        # 生成 SPS-matched intro（含從黑淡入）
+        if has_intro:
+            if not _build_static_image_video(
+                ffmpeg, intro_image, intro_mp4,
+                intro_duration, props, h264_params,
+                fade_in_from_black=True, fade_out_to_black=False,
+                fade_duration=fade_duration,
+            ):
+                return None
+
+        # 生成 SPS-matched outro（含淡出到黑）
+        if has_outro:
+            if not _build_static_image_video(
+                ffmpeg, outro_image, outro_mp4,
+                outro_duration, props, h264_params,
+                fade_in_from_black=False, fade_out_to_black=True,
+                fade_duration=fade_duration,
+            ):
+                return None
+
+        # 寫 concat list（路徑用正斜線，ffmpeg concat 需要）
+        def _safe_path(p):
+            return p.replace("\\", "/").replace("'", "\\'")
+
+        with open(concat_list_path, "w", encoding="utf-8") as f:
+            if has_intro:
+                f.write(f"file '{_safe_path(intro_mp4)}'\n")
+            f.write(f"file '{_safe_path(video_path)}'\n")
+            if has_outro:
+                f.write(f"file '{_safe_path(outro_mp4)}'\n")
+
+        # 計算 afade 時間點（相對於 concat 輸出的絕對時間軸）
+        intro_len = intro_duration if has_intro else 0.0
+        content_start = intro_len
+        content_end = intro_len + content_dur
+
+        af_parts = []
+        if has_intro:
+            # content 開頭：從靜音淡入（fade_duration 秒）
+            af_parts.append(f"afade=t=in:st={content_start}:d={fade_duration}")
+        if has_outro:
+            # content 結尾：淡出到靜音（fade_duration 秒）
+            fade_out_start = max(0.0, content_end - fade_duration)
+            af_parts.append(
+                f"afade=t=out:st={fade_out_start}:d={fade_duration}"
+            )
+        af_filter = ",".join(af_parts) if af_parts else None
+
+        # 單次 ffmpeg：video stream copy + 音訊重編（含 afade）
+        cmd = [
+            ffmpeg, "-y",
+            "-f", "concat", "-safe", "0", "-i", concat_list_path,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+        ]
+        if af_filter:
+            cmd += ["-af", af_filter]
+        cmd += ["-movflags", "+faststart", output_mp4]
+
+        rc, stderr = _run_ffmpeg(cmd)
+        if rc == -1:
+            return None  # 使用者中止
+        if rc != 0:
+            err = stderr.decode(errors="replace")
+            logger.warning(
+                f"hardcut: concat demuxer 失敗，fallback\n"
+                f"  stderr tail: {err[-300:]}"
+            )
+            return None
+
+        shutil.move(output_mp4, video_path)
+        parts = []
+        if has_intro:
+            parts.append(f"intro {intro_duration}s")
+        if has_outro:
+            parts.append(f"outro {outro_duration}s")
+        logger.info(
+            f"片頭/片尾已加入（hardcut + 音訊平滑，"
+            f"{', '.join(parts)}，audio_fade={fade_duration}s）"
+        )
+        return video_path
+
+    except Exception as e:
+        logger.error(f"hardcut 發生錯誤: {e}")
+        return None
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except OSError:
+            pass
+
+
+def add_intro_outro(video_path, intro_image=None, outro_image=None,
+                    intro_duration=3, outro_duration=3, fade_duration=0.5):
+    """為影片加上片頭/片尾圖片。
+
+    主路徑（硬切 + 音訊淡入淡出）：
+      content 完全 stream copy，只重編音訊。3 小時影片約 1-2 分鐘。
+      視覺效果：intro 圖片（0.5s 從黑淡入） → 硬切到 content →
+               硬切到 outro 圖片（0.5s 淡出到黑）
+      音訊效果：content 邊界 0.5s 平滑淡入/淡出
+
+    Fallback（filter_complex 全片重編）：
+      主路徑失敗時自動切換（SPS 不相容、罕見 pix_fmt 等）。
+      速度慢（3 小時 ~10-60 分鐘），但萬無一失。
+
+    Args:
+        video_path: 裁剪後的影片路徑（成功時會被覆蓋）
+        intro_image/outro_image: 圖片路徑（None 則跳過）
+        intro_duration/outro_duration: 圖片持續秒數
+        fade_duration: 淡入淡出秒數
+
+    Returns:
+        str: 成功回傳輸出路徑，失敗回傳 None
+    """
+    if not intro_image and not outro_image:
+        return video_path
+
+    # 主路徑
+    result = _add_intro_outro_hardcut(
+        video_path, intro_image, outro_image,
+        intro_duration, outro_duration, fade_duration,
+    )
+    if result is not None:
+        return result
+
+    # Fallback：全片重編（確保正確但慢）
+    logger.warning("hardcut 路徑失敗，fallback 到 filter_complex 全片重編")
+    return _add_intro_outro_reencode(
+        video_path, intro_image, outro_image,
+        intro_duration, outro_duration, fade_duration,
+    )
