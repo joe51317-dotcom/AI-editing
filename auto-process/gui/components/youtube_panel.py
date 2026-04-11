@@ -265,11 +265,20 @@ class YouTubePanel(ctk.CTkFrame):
         ).pack(anchor="w", padx=PADDING["section"], pady=(PADDING["inner"], 0))
 
         content = ctk.CTkFrame(self, fg_color="transparent")
-        content.pack(fill="x", padx=PADDING["section"], pady=PADDING["inner"])
+        content.pack(fill="x", padx=PADDING["section"], pady=(6, 8))
+
+        # ── 本地輸出 section label ───────────────────
+        ctk.CTkLabel(
+            content,
+            text="本地輸出",
+            font=(FONT_FAMILY, FONT_SIZES["micro"], "bold"),
+            text_color=COLORS["text_tertiary"],
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
 
         # ── 儲存位置 ────────────────────────────────
         row_output = ctk.CTkFrame(content, fg_color="transparent")
-        row_output.pack(fill="x", pady=2)
+        row_output.pack(fill="x", pady=(1, 1))
 
         ctk.CTkLabel(
             row_output,
@@ -308,6 +317,16 @@ class YouTubePanel(ctk.CTkFrame):
             command=self._browse_output_dir,
         ).pack(side="right")
 
+        # ── YouTube 上傳 section label ───────────────
+        ctk.CTkFrame(content, fg_color=COLORS["border_subtle"], height=1).pack(fill="x", pady=(6, 4))
+        ctk.CTkLabel(
+            content,
+            text="YouTube 上傳",
+            font=(FONT_FAMILY, FONT_SIZES["micro"], "bold"),
+            text_color=COLORS["text_tertiary"],
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 2))
+
         # ── 上傳到 YouTube checkbox ─────────────────
         self.upload_var = ctk.BooleanVar(value=True)
         self.upload_checkbox = ctk.CTkCheckBox(
@@ -323,7 +342,7 @@ class YouTubePanel(ctk.CTkFrame):
             corner_radius=4,
             command=self._toggle_youtube_settings,
         )
-        self.upload_checkbox.pack(anchor="w", pady=(6, 4))
+        self.upload_checkbox.pack(anchor="w", pady=(0, 4))
 
         # ── YouTube 設定容器（可折疊）────────────────
         self.yt_settings_frame = ctk.CTkFrame(content, fg_color="transparent")
@@ -331,7 +350,7 @@ class YouTubePanel(ctk.CTkFrame):
 
         # --- Row 1: 帳號 + 登入按鈕 ---
         row1 = ctk.CTkFrame(self.yt_settings_frame, fg_color="transparent")
-        row1.pack(fill="x", pady=2)
+        row1.pack(fill="x", pady=(1, 1))
 
         ctk.CTkLabel(
             row1,
@@ -367,7 +386,7 @@ class YouTubePanel(ctk.CTkFrame):
 
         # --- Row 2: 播放清單（可搜尋） ---
         row2 = ctk.CTkFrame(self.yt_settings_frame, fg_color="transparent")
-        row2.pack(fill="x", pady=2)
+        row2.pack(fill="x", pady=(1, 1))
 
         ctk.CTkLabel(
             row2,
@@ -385,7 +404,7 @@ class YouTubePanel(ctk.CTkFrame):
 
         # --- Row 3: 隱私 + 封面圖 ---
         row3 = ctk.CTkFrame(self.yt_settings_frame, fg_color="transparent")
-        row3.pack(fill="x", pady=2)
+        row3.pack(fill="x", pady=(1, 1))
 
         ctk.CTkLabel(
             row3,
@@ -462,7 +481,7 @@ class YouTubePanel(ctk.CTkFrame):
 
         # ── 影片描述模板 ──────────────────────────
         desc_row = ctk.CTkFrame(self.yt_settings_frame, fg_color="transparent")
-        desc_row.pack(fill="x", pady=(4, 2))
+        desc_row.pack(fill="x", pady=(3, 2))
 
         ctk.CTkLabel(
             desc_row,
@@ -480,7 +499,7 @@ class YouTubePanel(ctk.CTkFrame):
             text_color=COLORS["text_primary"],
             border_width=1,
             corner_radius=6,
-            height=50,
+            height=42,
             wrap="word",
         )
         self.description_textbox.pack(fill="x", pady=(2, 0))

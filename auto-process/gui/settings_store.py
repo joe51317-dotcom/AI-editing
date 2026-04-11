@@ -24,6 +24,7 @@ DEFAULTS = {
     "outro_path": None,
     "intro_duration": "3",
     "outro_duration": "3",
+    "active_tab": 0,
 }
 
 

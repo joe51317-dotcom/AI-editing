@@ -9,12 +9,13 @@ import threading
 import customtkinter as ctk
 from PIL import Image
 
-from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, WINDOW_SIZE, WINDOW_MIN_SIZE
+from gui.theme import COLORS, FONT_FAMILY, FONT_FAMILY_DISPLAY, FONT_SIZES, PADDING, WINDOW_SIZE, WINDOW_MIN_SIZE
 from gui.components.video_panel import VideoPanel
 from gui.components.youtube_panel import YouTubePanel
 from gui.components.settings_panel import SettingsPanel
 from gui.components.progress_panel import ProgressPanel
 from gui.components.log_viewer import LogViewer
+from gui.components.tab_bar import TabBar
 from gui.settings_store import load_settings, save_settings
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ class AutoProcessApp(ctk.CTk):
         ctk.CTkLabel(
             brand_frame,
             text="鼎愛",
-            font=(FONT_FAMILY, FONT_SIZES["title"], "bold"),
+            font=(FONT_FAMILY_DISPLAY, FONT_SIZES["display"], "bold"),
             text_color=COLORS["accent"],
         ).pack(side="left")
 
@@ -164,23 +165,42 @@ class AutoProcessApp(ctk.CTk):
         self.video_panel = VideoPanel(left_col)
         self.video_panel.grid(row=0, column=0, sticky="nsew")
 
-        # ── 右欄：設定 + 狀態 ────────────────────────────
+        # ── 右欄：分頁設定 + sticky 動作/進度 + 日誌 ──
         right_col = ctk.CTkFrame(main_frame, fg_color="transparent")
         right_col.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         right_col.grid_columnconfigure(0, weight=1)
-        right_col.grid_rowconfigure(4, weight=1)  # 日誌面板可擴展
+        right_col.grid_rowconfigure(1, weight=1)   # tab content 吃掉剩餘空間
 
-        # YouTube 面板
-        self.youtube_panel = YouTubePanel(right_col)
-        self.youtube_panel.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        # ── Tab Bar ──
+        self.tab_bar = TabBar(
+            right_col,
+            tabs=["輸出設定", "處理設定"],
+            on_change=self._on_tab_change,
+        )
+        self.tab_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
-        # 設定面板
-        self.settings_panel = SettingsPanel(right_col)
-        self.settings_panel.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+        # ── 可捲動 Tab 內容區 ──
+        self.tab_content = ctk.CTkScrollableFrame(
+            right_col,
+            fg_color="transparent",
+            scrollbar_button_color=COLORS["border"],
+            scrollbar_button_hover_color=COLORS["accent_dim"],
+        )
+        self.tab_content.grid(row=1, column=0, sticky="nsew")
+        self.tab_content.grid_columnconfigure(0, weight=1)
 
-        # 操作按鈕列
+        # YouTube 面板（輸出設定）
+        self.youtube_panel = YouTubePanel(self.tab_content)
+        self.youtube_panel.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        # 設定面板（處理設定）— 預設隱藏
+        self.settings_panel = SettingsPanel(self.tab_content)
+        self.settings_panel.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.settings_panel.grid_remove()
+
+        # ── Sticky 操作按鈕列 ──
         btn_frame = ctk.CTkFrame(right_col, fg_color="transparent")
-        btn_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+        btn_frame.grid(row=2, column=0, sticky="ew", pady=(8, 6))
         btn_frame.grid_columnconfigure(0, weight=1)
 
         self.start_btn = ctk.CTkButton(
@@ -211,13 +231,13 @@ class AutoProcessApp(ctk.CTk):
         )
         self.stop_btn.pack(side="right")
 
-        # 進度面板
+        # ── Sticky 進度面板 ──
         self.progress_panel = ProgressPanel(right_col, on_retry=self._retry_video)
-        self.progress_panel.grid(row=3, column=0, sticky="ew", pady=(0, 5))
+        self.progress_panel.grid(row=3, column=0, sticky="ew", pady=(0, 4))
 
-        # 日誌面板（預設收合，展開時填滿剩餘空間）
+        # ── 日誌面板（貼底，預設收合）──
         self.log_viewer = LogViewer(right_col)
-        self.log_viewer.grid(row=4, column=0, sticky="nsew")
+        self.log_viewer.grid(row=4, column=0, sticky="ew")
 
     def _setup_logging(self):
         """設定 logging 導向 GUI"""
@@ -375,6 +395,15 @@ class AutoProcessApp(ctk.CTk):
         )
         self.current_worker.start()
 
+    def _on_tab_change(self, idx: int):
+        """切換分頁：互斥顯示 YouTube / Settings 面板"""
+        if idx == 0:
+            self.settings_panel.grid_remove()
+            self.youtube_panel.grid()
+        else:
+            self.youtube_panel.grid_remove()
+            self.settings_panel.grid()
+
     def _stop_processing(self):
         """停止處理"""
         if self.current_worker:
@@ -487,6 +516,12 @@ class AutoProcessApp(ctk.CTk):
             except Exception:
                 pass
 
+        # 恢復上次使用的分頁
+        active_tab = settings.get("active_tab", 0)
+        if active_tab != 0:
+            self.tab_bar.set_active(active_tab)
+            self._on_tab_change(active_tab)
+
     def _save_settings(self):
         """收集各面板狀態並儲存"""
         settings = {}
@@ -494,6 +529,7 @@ class AutoProcessApp(ctk.CTk):
         settings.update(self.settings_panel.get_state())
         settings.update(self.video_panel.naming_panel.get_state())
         settings["window_geometry"] = self.geometry()
+        settings["active_tab"] = self.tab_bar.active
         save_settings(settings)
 
     def _on_close(self):
