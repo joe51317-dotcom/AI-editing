@@ -24,7 +24,6 @@ DEFAULTS = {
     "outro_path": None,
     "intro_duration": "3",
     "outro_duration": "3",
-    "fade_duration": "0.5",
 }
 
 

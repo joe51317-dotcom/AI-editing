@@ -24,6 +24,9 @@ _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 
 # 暫存目錄前綴，用於啟動時清理殘留
 _TEMP_PREFIX = "auto_process_render_"
 
+# hardcut 路徑的音訊淡入淡出秒數（不需 UI 設定，固定 0.5s）
+_HARDCUT_FADE = 0.5
+
 # ── 停止支援 ─────────────────────────────────────────────
 _stop_event = None
 
@@ -1109,16 +1112,17 @@ def _build_static_image_video(ffmpeg, image_path, output_mp4,
 
 
 def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
-                             intro_duration, outro_duration, fade_duration):
+                             intro_duration, outro_duration):
     """硬切 concat + 音訊平滑過渡（主路徑）。
 
     video 完全 stream copy（content 從未被解碼），音訊在 concat pass 中
-    以 afade 做淡入淡出。避免任何對 content 的 split，繞開 open GOP
-    孤兒 B-frame 問題。
+    以 afade 做淡入淡出（固定 _HARDCUT_FADE=0.5s，不需 UI 設定）。
+    避免任何對 content 的 split，繞開 open GOP 孤兒 B-frame 問題。
 
     Returns:
         str | None: 成功回傳 video_path，失敗回傳 None（觸發 fallback）
     """
+    fade_duration = _HARDCUT_FADE  # 固定，不從呼叫端接
     has_intro = bool(intro_image and os.path.isfile(intro_image))
     has_outro = bool(outro_image and os.path.isfile(outro_image))
     if not has_intro and not has_outro:
@@ -1273,7 +1277,7 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
     # 主路徑
     result = _add_intro_outro_hardcut(
         video_path, intro_image, outro_image,
-        intro_duration, outro_duration, fade_duration,
+        intro_duration, outro_duration,
     )
     if result is not None:
         return result

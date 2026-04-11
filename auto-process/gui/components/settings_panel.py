@@ -267,29 +267,6 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=COLORS["text_primary"], corner_radius=4,
         ).pack(side="left", padx=(4, 0))
 
-        # --- 淡入淡出列 ---
-        fade_row = ctk.CTkFrame(self._io_detail, fg_color="transparent")
-        fade_row.pack(fill="x", pady=2)
-
-        ctk.CTkLabel(
-            fade_row, text="淡入淡出:",
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left")
-
-        self._fade_dur_var = ctk.StringVar(value="0.5")
-        ctk.CTkEntry(
-            fade_row, textvariable=self._fade_dur_var, width=45, height=26,
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
-            text_color=COLORS["text_primary"], corner_radius=4,
-        ).pack(side="left", padx=(4, 4))
-
-        ctk.CTkLabel(
-            fade_row, text="秒",
-            font=(FONT_FAMILY, FONT_SIZES["small"]),
-            text_color=COLORS["text_dim"],
-        ).pack(side="left")
 
     def _toggle_intro_outro(self):
         """切換片頭/片尾設定面板顯示"""
@@ -498,10 +475,6 @@ class SettingsPanel(ctk.CTkFrame):
             outro_dur = float(self._outro_dur_var.get())
         except ValueError:
             outro_dur = 3.0
-        try:
-            fade_dur = float(self._fade_dur_var.get())
-        except ValueError:
-            fade_dur = 0.5
 
         return {
             "enabled": self._intro_outro_var.get(),
@@ -509,7 +482,6 @@ class SettingsPanel(ctk.CTkFrame):
             "outro_path": self._outro_path,
             "intro_duration": max(0.5, intro_dur),
             "outro_duration": max(0.5, outro_dur),
-            "fade_duration": max(0, fade_dur),
         }
 
     def get_state(self):
@@ -521,7 +493,6 @@ class SettingsPanel(ctk.CTkFrame):
             "outro_path": self._outro_path,
             "intro_duration": self._intro_dur_var.get(),
             "outro_duration": self._outro_dur_var.get(),
-            "fade_duration": self._fade_dur_var.get(),
         }
 
     def set_state(self, state):
@@ -549,5 +520,3 @@ class SettingsPanel(ctk.CTkFrame):
             self._intro_dur_var.set(state["intro_duration"])
         if "outro_duration" in state:
             self._outro_dur_var.set(state["outro_duration"])
-        if "fade_duration" in state:
-            self._fade_dur_var.set(state["fade_duration"])
