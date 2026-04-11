@@ -241,8 +241,14 @@ class AutoProcessApp(ctk.CTk):
     def _handle_message(self, msg):
         """處理來自 Worker 的訊息"""
         msg_type = msg.get("type")
-        filename = msg.get("filename", "")
 
+        # all_done 沒有 filename，需要在 item 查找前處理
+        if msg_type == "all_done":
+            if self.processing:
+                self._on_all_done()
+            return
+
+        filename = msg.get("filename", "")
         item = self.progress_panel.get_item(filename)
         if not item:
             return
@@ -261,10 +267,6 @@ class AutoProcessApp(ctk.CTk):
 
         elif msg_type == "error":
             item.set_error(msg.get("text", "失敗"))
-
-        elif msg_type == "all_done":
-            if self.processing:
-                self._on_all_done()
 
     def _start_processing(self):
         """開始處理所有影片"""
