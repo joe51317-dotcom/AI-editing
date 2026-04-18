@@ -61,9 +61,8 @@ a = Analysis(
         # 互動式 Python shell（未使用）
         'IPython', 'ipykernel', 'ipython_genutils',
         'jedi', 'parso',
-        # 測試框架（運行時不需要）
+        # 測試框架（運行時不需要，但 unittest 不可排除：google-auth-oauthlib OAuth 流程會 transitive import 之）
         'pytest', '_pytest',
-        'unittest',
         # 文件工具（未使用）
         'docutils', 'sphinx',
         # 安裝工具（運行時不需要）
@@ -71,7 +70,6 @@ a = Analysis(
         'lib2to3',
         # tkinter 測試（未使用）
         'tkinter.test',
-        'test',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
