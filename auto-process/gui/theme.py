@@ -20,8 +20,8 @@ COLORS = {
     "accent": "#f59f00",
     "accent_hover": "#fbbf24",
     "accent_dim": "#7a4f0a",
-    "accent_glow": "#f59f0022",
-    "accent_soft": "#f59f0011",  # 分頁底色、卡片 tint
+    "accent_glow": "#1e1a0e",    # 琥珀微光（不透明，替代 alpha）
+    "accent_soft": "#161410",    # 分頁底色、卡片 tint（不透明）
 
     # 文字
     "text_primary": "#eef0f6",

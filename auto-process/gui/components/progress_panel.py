@@ -111,7 +111,7 @@ class ProgressPanel(ctk.CTkFrame):
         self._on_retry = on_retry
         self._timer_start = None
         self._timer_after_id = None
-        self._list_visible = True
+        self._list_visible = False
         self._output_dir = None
 
         # ── Header 列（永遠可見）─────────────────────
@@ -141,7 +141,7 @@ class ProgressPanel(ctk.CTkFrame):
         # 展開/收合按鈕
         self.toggle_btn = ctk.CTkButton(
             header,
-            text="詳情 ▾",
+            text="詳情 ▸",
             width=64,
             height=22,
             font=(FONT_FAMILY, FONT_SIZES["tiny"]),
@@ -168,9 +168,9 @@ class ProgressPanel(ctk.CTkFrame):
         self.list_frame = ctk.CTkScrollableFrame(
             self,
             fg_color="transparent",
-            height=100,
+            height=60,
         )
-        self.list_frame.pack(fill="x", padx=PADDING["section"], pady=PADDING["tiny"])
+        # 預設收合，不 pack
 
         self.empty_label = ctk.CTkLabel(
             self.list_frame,
@@ -306,5 +306,6 @@ class ProgressPanel(ctk.CTkFrame):
         self.empty_label.pack(pady=6)
         self.overall_bar.set(0)
         self.count_label.configure(text="尚未開始")
-        if not self._list_visible:
+        # clear 後回到收合狀態
+        if self._list_visible:
             self._toggle_list()

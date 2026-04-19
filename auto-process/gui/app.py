@@ -169,7 +169,7 @@ class AutoProcessApp(ctk.CTk):
         right_col = ctk.CTkFrame(main_frame, fg_color="transparent")
         right_col.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         right_col.grid_columnconfigure(0, weight=1)
-        right_col.grid_rowconfigure(1, weight=1)   # tab content 吃掉剩餘空間
+        right_col.grid_rowconfigure(1, weight=1, minsize=380)  # tab content 吃掉剩餘空間
 
         # ── Tab Bar ──
         self.tab_bar = TabBar(

@@ -308,25 +308,14 @@ class VideoPanel(ctk.CTkFrame):
         )
         self.clear_all_btn.pack(side="right", padx=(0, 6))
 
-        # 拖放區域
-        self.drop_area = ctk.CTkFrame(
+        # 拖放提示（無邊框，融入背景）
+        self.drop_hint = ctk.CTkLabel(
             self,
-            fg_color=COLORS["bg_input"],
-            border_color=COLORS["border"],
-            border_width=2,
-            corner_radius=CORNER_RADIUS,
-            height=64,
-        )
-        self.drop_area.pack(fill="x", padx=PADDING["section"], pady=(0, 4))
-        self.drop_area.pack_propagate(False)
-
-        self.drop_label = ctk.CTkLabel(
-            self.drop_area,
-            text="拖放影片檔案到此處",
-            font=(FONT_FAMILY, FONT_SIZES["body"]),
+            text="拖放影片到這裡",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
             text_color=COLORS["text_dim"],
         )
-        self.drop_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.drop_hint.pack(pady=(0, 4))
 
         # 影片清單（填滿剩餘空間）
         self.list_frame = ctk.CTkScrollableFrame(
@@ -345,26 +334,33 @@ class VideoPanel(ctk.CTkFrame):
         self.naming_panel.pack(fill="x", padx=PADDING["section"], pady=(6, PADDING["inner"]))
 
     def setup_dnd(self, root):
-        """設定拖放功能（需要 tkinterdnd2）"""
+        """設定拖放功能（整個左欄都可拖放）"""
+        targets = [self, self.list_frame]
+        # CTkScrollableFrame 內部有 canvas，也一起綁定
         try:
-            self.drop_area.drop_target_register("DND_Files")
-            self.drop_area.dnd_bind("<<Drop>>", self._on_drop)
-            self.drop_area.dnd_bind("<<DragEnter>>", self._on_drag_enter)
-            self.drop_area.dnd_bind("<<DragLeave>>", self._on_drag_leave)
-        except Exception:
+            targets.append(self.list_frame._parent_canvas)
+        except AttributeError:
             pass
+        for widget in targets:
+            try:
+                widget.drop_target_register("DND_Files")
+                widget.dnd_bind("<<Drop>>", self._on_drop)
+                widget.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+                widget.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+            except Exception:
+                pass
 
     def _on_drop(self, event):
-        self.drop_area.configure(border_color=COLORS["border"])
+        self.configure(fg_color=COLORS["bg_card"])
         files = self._parse_drop_data(event.data)
         for f in files:
             self.add_video(f)
 
     def _on_drag_enter(self, event):
-        self.drop_area.configure(border_color=COLORS["accent"])
+        self.configure(fg_color=COLORS["bg_elevated"])
 
     def _on_drag_leave(self, event):
-        self.drop_area.configure(border_color=COLORS["border"])
+        self.configure(fg_color=COLORS["bg_card"])
 
     def _parse_drop_data(self, data):
         files = []
@@ -407,9 +403,9 @@ class VideoPanel(ctk.CTkFrame):
 
     def _update_drop_label(self):
         if self.video_items:
-            self.drop_label.configure(text=f"已加入 {len(self.video_items)} 個影片（可繼續拖放）")
+            self.drop_hint.configure(text=f"已加入 {len(self.video_items)} 個影片，可繼續拖放")
         else:
-            self.drop_label.configure(text="拖放影片檔案到此處")
+            self.drop_hint.configure(text="拖放影片到這裡")
 
     def get_videos(self):
         return [
