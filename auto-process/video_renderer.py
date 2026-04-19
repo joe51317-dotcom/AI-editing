@@ -928,36 +928,15 @@ def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
             filter_parts.append(f"[{i}:v]fps={fps_val}[nv{i}]")
             filter_parts.append(f"[{i}:a]aresample=48000[na{i}]")
 
-        cur_v = f"nv{idx_content}"
-        cur_a = f"na{idx_content}"
-
-        if has_intro:
-            off = max(0.0, intro_duration - fade_duration)
-            filter_parts.append(
-                f"[nv0][nv{idx_content}]"
-                f"xfade=transition=fade:duration={fade_duration}:offset={off}[v_a]"
-            )
-            filter_parts.append(
-                f"[na0][na{idx_content}]"
-                f"acrossfade=d={fade_duration}:c1=qsin:c2=qsin[a_a]"
-            )
-            cur_v, cur_a = "v_a", "a_a"
-
-        if has_outro:
-            # 目前時間軸長度（intro 和 content 在 xfade 期間重疊 fade_duration 秒）
-            current_len = main_dur
-            if has_intro:
-                current_len = intro_duration + main_dur - fade_duration
-            off2 = max(0.0, current_len - fade_duration)
-            filter_parts.append(
-                f"[{cur_v}][nv{idx_outro}]"
-                f"xfade=transition=fade:duration={fade_duration}:offset={off2}[vout]"
-            )
-            filter_parts.append(
-                f"[{cur_a}][na{idx_outro}]"
-                f"acrossfade=d={fade_duration}:c1=qsin:c2=qsin[aout]"
-            )
-            cur_v, cur_a = "vout", "aout"
+        # 硬切串接：依實際輸入數量建 concat filter
+        n_segments = len(inputs)
+        seg_pairs = "".join(
+            f"[nv{i}][na{i}]" for i in range(n_segments)
+        )
+        filter_parts.append(
+            f"{seg_pairs}concat=n={n_segments}:v=1:a=1[vout][aout]"
+        )
+        cur_v, cur_a = "vout", "aout"
 
         fc = ";".join(filter_parts)
         map_v = f"[{cur_v}]"
@@ -994,7 +973,7 @@ def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
             transitions.append(f"intro {intro_duration}s")
         if has_outro:
             transitions.append(f"outro {outro_duration}s")
-        logger.info(f"片頭/片尾已加入 ({', '.join(transitions)}, fade={fade_duration}s)")
+        logger.info(f"片頭/片尾已加入（reencode，{', '.join(transitions)}）")
         return video_path
 
     except Exception as e:
@@ -1156,23 +1135,21 @@ def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
         output_mp4 = os.path.join(temp_dir, "output.mp4")
         concat_list_path = os.path.join(temp_dir, "concat.txt")
 
-        # 生成 SPS-matched intro（含從黑淡入）
+        # 生成 SPS-matched intro（無淡入）
         if has_intro:
             if not _build_static_image_video(
                 ffmpeg, intro_image, intro_mp4,
                 intro_duration, props, h264_params,
-                fade_in_from_black=True, fade_out_to_black=False,
-                fade_duration=fade_duration,
+                fade_in_from_black=False, fade_out_to_black=False,
             ):
                 return None
 
-        # 生成 SPS-matched outro（含淡出到黑）
+        # 生成 SPS-matched outro（無淡出）
         if has_outro:
             if not _build_static_image_video(
                 ffmpeg, outro_image, outro_mp4,
                 outro_duration, props, h264_params,
-                fade_in_from_black=False, fade_out_to_black=True,
-                fade_duration=fade_duration,
+                fade_in_from_black=False, fade_out_to_black=False,
             ):
                 return None
 
@@ -1187,33 +1164,14 @@ def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
             if has_outro:
                 f.write(f"file '{_safe_path(outro_mp4)}'\n")
 
-        # 計算 afade 時間點（相對於 concat 輸出的絕對時間軸）
-        intro_len = intro_duration if has_intro else 0.0
-        content_start = intro_len
-        content_end = intro_len + content_dur
-
-        af_parts = []
-        if has_intro:
-            # content 開頭：從靜音淡入（fade_duration 秒）
-            af_parts.append(f"afade=t=in:st={content_start}:d={fade_duration}")
-        if has_outro:
-            # content 結尾：淡出到靜音（fade_duration 秒）
-            fade_out_start = max(0.0, content_end - fade_duration)
-            af_parts.append(
-                f"afade=t=out:st={fade_out_start}:d={fade_duration}"
-            )
-        af_filter = ",".join(af_parts) if af_parts else None
-
-        # 單次 ffmpeg：video stream copy + 音訊重編（含 afade）
+        # 單次 ffmpeg：video stream copy + 音訊重編（硬切，無 afade）
         cmd = [
             ffmpeg, "-y",
             "-f", "concat", "-safe", "0", "-i", concat_list_path,
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", output_mp4,
         ]
-        if af_filter:
-            cmd += ["-af", af_filter]
-        cmd += ["-movflags", "+faststart", output_mp4]
 
         rc, stderr = _run_ffmpeg(cmd)
         if rc == -1:
@@ -1232,10 +1190,7 @@ def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
             parts.append(f"intro {intro_duration}s")
         if has_outro:
             parts.append(f"outro {outro_duration}s")
-        logger.info(
-            f"片頭/片尾已加入（hardcut + 音訊平滑，"
-            f"{', '.join(parts)}，audio_fade={fade_duration}s）"
-        )
+        logger.info(f"片頭/片尾已加入（hardcut，{', '.join(parts)}）")
         return video_path
 
     except Exception as e:
@@ -1250,13 +1205,11 @@ def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
 
 def add_intro_outro(video_path, intro_image=None, outro_image=None,
                     intro_duration=3, outro_duration=3, fade_duration=0.5):
-    """為影片加上片頭/片尾圖片。
+    """為影片加上片頭/片尾圖片（硬切，無淡入淡出）。
 
-    主路徑（硬切 + 音訊淡入淡出）：
+    主路徑（concat demuxer）：
       content 完全 stream copy，只重編音訊。3 小時影片約 1-2 分鐘。
-      視覺效果：intro 圖片（0.5s 從黑淡入） → 硬切到 content →
-               硬切到 outro 圖片（0.5s 淡出到黑）
-      音訊效果：content 邊界 0.5s 平滑淡入/淡出
+      視覺效果：intro 圖片 → 硬切到 content → 硬切到 outro 圖片
 
     Fallback（filter_complex 全片重編）：
       主路徑失敗時自動切換（SPS 不相容、罕見 pix_fmt 等）。
