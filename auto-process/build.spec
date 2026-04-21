@@ -54,7 +54,23 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # 科學計算（未使用）
+        'matplotlib', 'mpl_toolkits',
+        'numpy',
+        # 互動式 Python shell（未使用）
+        'IPython', 'ipykernel', 'ipython_genutils',
+        'jedi', 'parso',
+        # 測試框架（運行時不需要，但 unittest 不可排除：google-auth-oauthlib OAuth 流程會 transitive import 之）
+        'pytest', '_pytest',
+        # 文件工具（未使用）
+        'docutils', 'sphinx',
+        # 安裝工具（運行時不需要）
+        'setuptools', 'pkg_resources._vendor', '_distutils_hack',
+        'lib2to3',
+        # tkinter 測試（未使用）
+        'tkinter.test',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -66,15 +82,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='AIEdit',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -82,4 +96,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/app.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='AIEdit',
 )

@@ -23,11 +23,14 @@ logger = logging.getLogger(__name__)
 
 
 def trim_course_video(video_path, speech_threshold_db=None, min_duration=None,
-                      break_threshold=None, progress_callback=None):
+                      break_threshold=None, progress_callback=None,
+                      output_name=None):
     """
     裁剪課程影片：移除開頭/結尾空白，遇到長休息則切成多段影片。
 
-    輸出命名：原檔名-1.mp4, 原檔名-2.mp4, ...
+    輸出命名：
+      - output_name 為 None 時：原檔名（單段）或 原檔名-N（多段）
+      - output_name 有值時：以該名稱為 base（單段），多段則加 -N 後綴
 
     Args:
         video_path: 來源影片路徑
@@ -35,6 +38,7 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None,
         min_duration: 最短靜音秒數（None 則用 .env 設定）
         break_threshold: 休息判定秒數（None 則用 .env 設定）
         progress_callback: 可選回呼 callback(stage, detail) 用於 GUI 進度
+        output_name: 輸出檔案基礎名（不含副檔名和路徑），None 則沿用原檔名
 
     Returns:
         list[str]: 輸出檔案路徑清單，失敗則空清單
@@ -79,14 +83,27 @@ def trim_course_video(video_path, speech_threshold_db=None, min_duration=None,
             return []
 
     # Step 2: 對每個 part 分別裁剪
-    base, ext = os.path.splitext(video_path)
+    src_dir = os.path.dirname(video_path)
+    ext = os.path.splitext(video_path)[1]
+    if output_name:
+        base = os.path.join(src_dir, output_name)
+        # 若解析後的路徑與來源相同則加 _trimmed 防止就地覆寫
+        if os.path.abspath(base + ext) == os.path.abspath(video_path):
+            base = base + "_trimmed"
+    else:
+        base = os.path.splitext(video_path)[0]
     output_paths = []
     input_size = os.path.getsize(video_path) / (1024 * 1024)
 
     total_parts = len(parts)
     for i, segments in enumerate(parts):
         part_num = i + 1
-        output_path = f"{base}-{part_num}{ext}"
+        if total_parts == 1:
+            output_path = f"{base}{ext}"
+            if os.path.abspath(output_path) == os.path.abspath(video_path):
+                output_path = f"{base}_trimmed{ext}"
+        else:
+            output_path = f"{base}-{part_num}{ext}"
 
         logger.info(f"--- Part {part_num}/{total_parts} ---")
 

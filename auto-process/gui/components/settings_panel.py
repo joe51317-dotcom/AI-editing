@@ -6,7 +6,7 @@ import os
 import customtkinter as ctk
 from tkinter import filedialog
 
-from gui.theme import COLORS, FONT_FAMILY, FONT_FAMILY_MONO, FONT_SIZES, PADDING, CORNER_RADIUS
+from gui.theme import COLORS, FONT_FAMILY, FONT_FAMILY_MONO, FONT_SIZES, PADDING, CORNER_RADIUS, CORNER_SMALL
 from gui.utils import parse_time_segments
 
 
@@ -39,9 +39,14 @@ class SettingsPanel(ctk.CTkFrame):
         )
         self.auto_card.pack(fill="x", pady=(0, 6))
 
+        # 頂部 accent 線（琥珀色，3px）
+        ctk.CTkFrame(
+            self.auto_card, fg_color=COLORS["accent"], height=3, corner_radius=0,
+        ).pack(fill="x")
+
         # 卡片內容 padding
         card_inner = ctk.CTkFrame(self.auto_card, fg_color="transparent")
-        card_inner.pack(fill="x", padx=10, pady=8)
+        card_inner.pack(fill="x", padx=10, pady=6)
 
         # 第一行：標題 + 推薦 badge
         header_row = ctk.CTkFrame(card_inner, fg_color="transparent")
@@ -76,7 +81,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=COLORS["text_secondary"],
             anchor="w",
         )
-        self.auto_desc.pack(fill="x", pady=(3, 4))
+        self.auto_desc.pack(fill="x", pady=(2, 3))
 
         # 功能亮點
         features_row = ctk.CTkFrame(card_inner, fg_color="transparent")
@@ -85,12 +90,12 @@ class SettingsPanel(ctk.CTkFrame):
         for feat in ["開頭/結尾靜音", "中間休息段", "免設定"]:
             feat_label = ctk.CTkLabel(
                 features_row,
-                text=f"  {feat}",
+                text=f"· {feat}",
                 font=(FONT_FAMILY, FONT_SIZES["tiny"]),
-                text_color=COLORS["success"],
+                text_color=COLORS["text_tertiary"],
                 anchor="w",
             )
-            feat_label.pack(side="left", padx=(0, 10))
+            feat_label.pack(side="left", padx=(0, 8))
 
         # 讓整個卡片可點擊
         self._bind_click_recursive(self.auto_card, lambda e: self._select_mode("auto"))
@@ -147,7 +152,7 @@ class SettingsPanel(ctk.CTkFrame):
         # 分隔線
         ctk.CTkFrame(
             parent, fg_color=COLORS["border_subtle"], height=1,
-        ).pack(fill="x", pady=(8, 6))
+        ).pack(fill="x", pady=(6, 4))
 
         # checkbox
         self._intro_outro_var = ctk.BooleanVar(value=False)
@@ -171,7 +176,7 @@ class SettingsPanel(ctk.CTkFrame):
 
         # --- 片頭列 ---
         intro_row = ctk.CTkFrame(self._io_detail, fg_color="transparent")
-        intro_row.pack(fill="x", pady=2)
+        intro_row.pack(fill="x", pady=1)
 
         ctk.CTkLabel(
             intro_row, text="片頭圖片:",
@@ -204,7 +209,7 @@ class SettingsPanel(ctk.CTkFrame):
 
         # --- 片尾列 ---
         outro_row = ctk.CTkFrame(self._io_detail, fg_color="transparent")
-        outro_row.pack(fill="x", pady=2)
+        outro_row.pack(fill="x", pady=1)
 
         ctk.CTkLabel(
             outro_row, text="片尾圖片:",
@@ -237,7 +242,7 @@ class SettingsPanel(ctk.CTkFrame):
 
         # --- 秒數設定列 ---
         dur_row = ctk.CTkFrame(self._io_detail, fg_color="transparent")
-        dur_row.pack(fill="x", pady=(4, 2))
+        dur_row.pack(fill="x", pady=(3, 1))
 
         ctk.CTkLabel(
             dur_row, text="片頭秒數:",

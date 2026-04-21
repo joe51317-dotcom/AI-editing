@@ -15,8 +15,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.py")
-DIST_EXE = os.path.join(SCRIPT_DIR, "dist", "AIEdit.exe")
-OUTPUT_EXE = os.path.join(REPO_ROOT, "AIEdit.exe")
+DIST_DIR = os.path.join(SCRIPT_DIR, "dist", "AIEdit")      # onedir 輸出目錄
+OUTPUT_DIR = os.path.join(REPO_ROOT, "AIEdit-dist")         # repo 根目錄下的發佈目錄
 
 
 def bump_version():
@@ -60,12 +60,15 @@ def main():
     print("\n📦 開始打包...")
     run(["python", "-m", "PyInstaller", "build.spec", "--noconfirm"])
 
-    # Step 3: 複製 exe 到桌面發佈資料夾
-    if os.path.isfile(DIST_EXE):
-        shutil.copy2(DIST_EXE, OUTPUT_EXE)
-        print(f"✅ exe 已複製到 {OUTPUT_EXE}")
+    # Step 3: 複製 onedir 目錄到 repo 根目錄
+    if os.path.isdir(DIST_DIR):
+        if os.path.exists(OUTPUT_DIR):
+            shutil.rmtree(OUTPUT_DIR)
+        shutil.copytree(DIST_DIR, OUTPUT_DIR)
+        print(f"✅ 發佈目錄已複製到 {OUTPUT_DIR}")
+        print(f"   分發方式：壓縮 AIEdit-dist/ 整個資料夾給同事")
     else:
-        print(f"⚠️  找不到 {DIST_EXE}，跳過複製")
+        print(f"⚠️  找不到 {DIST_DIR}，跳過複製")
 
     # Step 4: git commit + push
     print("\n🔖 提交版本更新...")
@@ -79,7 +82,7 @@ def main():
     )
     subprocess.run(["git", "push"], cwd=REPO_ROOT)
 
-    print(f"\n🎉 完成！AIEdit v{new_version} 已打包並發佈。")
+    print(f"\n🎉 完成！AIEdit v{new_version} 已打包。執行檔位於 AIEdit-dist/AIEdit.exe")
 
 
 if __name__ == "__main__":

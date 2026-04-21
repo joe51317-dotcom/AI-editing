@@ -61,7 +61,7 @@ class ProcessWorker(threading.Thread):
         self.queue.put({"type": msg_type, "filename": filename, **kwargs})
 
     def _apply_naming_rule(self, title, index, part=1):
-        """套用命名規則模板"""
+        """套用命名規則模板（用於 YouTube 標題）"""
         result = self.naming_rule
         result = result.replace("{filename}", title)
         result = result.replace("{date}", datetime.now().strftime("%Y-%m-%d"))
@@ -69,11 +69,28 @@ class ProcessWorker(threading.Thread):
         result = result.replace("{part}", str(part))
         return result
 
-    def _manual_trim(self, video_path, filename):
+    def _resolve_file_base(self, video_path, index):
+        """解析命名規則模板為輸出檔案基礎名（不含副檔名）。
+        {filename} 使用原始磁碟檔名，{date} 格式 YYYYMMDD（與 GUI 預覽一致）。"""
+        original_name = os.path.splitext(os.path.basename(video_path))[0]
+        result = self.naming_rule
+        result = result.replace("{filename}", original_name)
+        result = result.replace("{date}", datetime.now().strftime("%Y%m%d"))
+        result = result.replace("{index}", str(index))
+        result = result.replace("{part}", "")
+        return result.strip("-_ ")
+
+    def _manual_trim(self, video_path, filename, index=1):
         """手動裁剪：根據使用者指定的時間片段直接呼叫 render_video"""
         from video_renderer import render_video
 
-        base, ext = os.path.splitext(video_path)
+        src_dir = os.path.dirname(video_path)
+        ext = os.path.splitext(video_path)[1]
+        resolved_base = self._resolve_file_base(video_path, index)
+        base = os.path.join(src_dir, resolved_base)
+        if os.path.abspath(base + ext) == os.path.abspath(video_path):
+            base = base + "_trimmed"
+
         output_paths = []
         total_parts = len(self.manual_segments)
 
@@ -85,7 +102,12 @@ class ProcessWorker(threading.Thread):
                 return output_paths
 
             part_num = i + 1
-            output_path = f"{base}-{part_num}{ext}"
+            if total_parts == 1:
+                output_path = f"{base}{ext}"
+                if os.path.abspath(output_path) == os.path.abspath(video_path):
+                    output_path = f"{base}_trimmed{ext}"
+            else:
+                output_path = f"{base}-{part_num}{ext}"
 
             self._send(filename, "progress",
                        value=(i / total_parts) * TRIM_PROGRESS_END,
@@ -157,7 +179,7 @@ class ProcessWorker(threading.Thread):
 
         if self.trim_mode == "manual" and self.manual_segments:
             # --- 手動裁剪模式 ---
-            trimmed_files = self._manual_trim(video_path, filename)
+            trimmed_files = self._manual_trim(video_path, filename, index)
         elif self.trim_mode == "auto":
             # --- 自動裁剪模式 ---
             self._send(filename, "status", text="偵測靜音中...")
@@ -173,6 +195,7 @@ class ProcessWorker(threading.Thread):
                 speech_threshold_db=self.speech_threshold,
                 break_threshold=self.break_threshold,
                 progress_callback=trim_progress,
+                output_name=self._resolve_file_base(video_path, index),
             )
 
             if trimmed:

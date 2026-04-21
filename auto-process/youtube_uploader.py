@@ -11,15 +11,6 @@ import argparse
 import logging
 import time
 import http.client
-import httplib2
-
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-
 if sys.stdout is not None and hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
@@ -35,10 +26,6 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 # Resumable upload 重試設定
 MAX_RETRIES = 5
 RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
-RETRIABLE_EXCEPTIONS = (httplib2.HttpLib2Error, IOError, http.client.NotConnected,
-                        http.client.IncompleteRead, http.client.ImproperConnectionState,
-                        http.client.CannotSendRequest, http.client.CannotSendHeader,
-                        http.client.ResponseNotReady, http.client.BadStatusLine)
 
 
 _KEYRING_SERVICE = "auto-process-gui"
@@ -60,6 +47,7 @@ def _load_token_from_keyring():
     """從 keyring 載入 token JSON"""
     try:
         import keyring
+        from google.oauth2.credentials import Credentials
         data = keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
         if data:
             return Credentials.from_authorized_user_info(
@@ -122,6 +110,10 @@ def get_credentials(client_secret_path, token_path):
     Returns:
         google.oauth2.credentials.Credentials
     """
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+
     creds = None
     use_keyring = _keyring_available()
 
@@ -221,6 +213,8 @@ def upload_video(video_path, title=None, description="", tags=None,
     Returns:
         str | None: YouTube 影片 ID，失敗則 None
     """
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
     from config import (YOUTUBE_CLIENT_SECRET, YOUTUBE_TOKEN_PATH,
                         YOUTUBE_DEFAULT_PRIVACY, YOUTUBE_DEFAULT_CATEGORY)
 
@@ -276,6 +270,16 @@ def upload_video(video_path, title=None, description="", tags=None,
 
 def _resumable_upload(request, video_path, progress_callback=None):
     """執行 resumable upload，含重試邏輯"""
+    import httplib2
+    from googleapiclient.errors import HttpError
+    retriable_exceptions = (
+        httplib2.HttpLib2Error, IOError,
+        http.client.NotConnected, http.client.IncompleteRead,
+        http.client.ImproperConnectionState, http.client.CannotSendRequest,
+        http.client.CannotSendHeader, http.client.ResponseNotReady,
+        http.client.BadStatusLine,
+    )
+
     response = None
     retry = 0
     file_size = os.path.getsize(video_path) / (1024 * 1024)
@@ -296,7 +300,7 @@ def _resumable_upload(request, video_path, progress_callback=None):
             else:
                 logger.error(f"上傳失敗 (HTTP {e.resp.status}): {e.content.decode(errors='replace')}")
                 return None
-        except RETRIABLE_EXCEPTIONS as e:
+        except retriable_exceptions as e:
             retry = _handle_retry(retry, str(e))
             if retry is None:
                 return None
