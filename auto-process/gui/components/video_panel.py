@@ -1,12 +1,15 @@
 """
 影片選擇面板 — 拖放區域 + 影片清單 + 友善命名選擇
 """
+import logging
 import os
 import threading
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from gui.theme import COLORS, FONT_FAMILY, FONT_SIZES, PADDING, CORNER_RADIUS
+
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".mts", ".m4v"}
 
@@ -341,14 +344,18 @@ class VideoPanel(ctk.CTkFrame):
             targets.append(self.list_frame._parent_canvas)
         except AttributeError:
             pass
+        dnd_ok = False
         for widget in targets:
             try:
                 widget.drop_target_register("DND_Files")
                 widget.dnd_bind("<<Drop>>", self._on_drop)
                 widget.dnd_bind("<<DragEnter>>", self._on_drag_enter)
                 widget.dnd_bind("<<DragLeave>>", self._on_drag_leave)
-            except Exception:
-                pass
+                dnd_ok = True
+            except Exception as e:
+                logger.debug(f"DND 綁定失敗 ({type(widget).__name__}): {e}")
+        if not dnd_ok:
+            logger.warning("拖放功能無法初始化（tkinterdnd2 未安裝或 root 未啟用 TkinterDnD），請改用「瀏覽」按鈕選檔")
 
     def _on_drop(self, event):
         self.configure(fg_color=COLORS["bg_card"])

@@ -844,18 +844,18 @@ def _concat_via_ts(ffmpeg, file_list, output_path, temp_dir):
 
 
 def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
-                              intro_duration=3, outro_duration=3, fade_duration=0.5):
+                              intro_duration=3, outro_duration=3):
     """
     Fallback：單次 filter_complex 全片重新編碼（慢但萬無一失）。
 
     在 open GOP 來源無法用 concat demuxer 時使用。
-    所有段落在同一 decoder context 中做 xfade，輸出 closed GOP。
+    所有段落在同一 decoder context 中 concat，輸出 closed GOP。
+    硬切串接，無淡入淡出。
 
     Args:
         video_path: 裁剪後的影片路徑（成功時會被覆蓋）
         intro_image/outro_image: 圖片路徑（None 則跳過）
         intro_duration/outro_duration: 圖片持續秒數
-        fade_duration: 視訊淡入淡出秒數（xfade duration）
 
     Returns:
         str: 成功回傳輸出路徑，失敗回傳 None
@@ -888,7 +888,7 @@ def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
         if has_intro:
             intro_video = os.path.join(temp_dir, "intro.mp4")
             if not create_image_video(intro_image, intro_video, intro_duration,
-                                      fade_duration, props,
+                                      0, props,
                                       skip_fade_in=True, skip_fade_out=True):
                 logger.warning("建立片頭影片失敗，跳過片頭")
                 has_intro = False
@@ -896,7 +896,7 @@ def _add_intro_outro_reencode(video_path, intro_image=None, outro_image=None,
         if has_outro:
             outro_video = os.path.join(temp_dir, "outro.mp4")
             if not create_image_video(outro_image, outro_video, outro_duration,
-                                      fade_duration, props,
+                                      0, props,
                                       skip_fade_in=True, skip_fade_out=True):
                 logger.warning("建立片尾影片失敗，跳過片尾")
                 has_outro = False
@@ -1204,7 +1204,7 @@ def _add_intro_outro_hardcut(video_path, intro_image, outro_image,
 
 
 def add_intro_outro(video_path, intro_image=None, outro_image=None,
-                    intro_duration=3, outro_duration=3, fade_duration=0.5):
+                    intro_duration=3, outro_duration=3):
     """為影片加上片頭/片尾圖片（硬切，無淡入淡出）。
 
     主路徑（concat demuxer）：
@@ -1219,7 +1219,6 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
         video_path: 裁剪後的影片路徑（成功時會被覆蓋）
         intro_image/outro_image: 圖片路徑（None 則跳過）
         intro_duration/outro_duration: 圖片持續秒數
-        fade_duration: 淡入淡出秒數
 
     Returns:
         str: 成功回傳輸出路徑，失敗回傳 None
@@ -1239,5 +1238,5 @@ def add_intro_outro(video_path, intro_image=None, outro_image=None,
     logger.warning("hardcut 路徑失敗，fallback 到 filter_complex 全片重編")
     return _add_intro_outro_reencode(
         video_path, intro_image, outro_image,
-        intro_duration, outro_duration, fade_duration,
+        intro_duration, outro_duration,
     )

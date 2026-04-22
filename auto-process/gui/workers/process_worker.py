@@ -240,7 +240,6 @@ class ProcessWorker(threading.Thread):
                     outro_image=self.intro_outro.get("outro_path"),
                     intro_duration=self.intro_outro.get("intro_duration", 3),
                     outro_duration=self.intro_outro.get("outro_duration", 3),
-                    fade_duration=self.intro_outro.get("fade_duration", 0.5),
                 )
                 if not result:
                     msg = f"片頭/片尾加入失敗: {os.path.basename(fp)}"

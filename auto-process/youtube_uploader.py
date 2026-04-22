@@ -43,16 +43,17 @@ def _keyring_available():
         return False
 
 
-def _load_token_from_keyring():
-    """從 keyring 載入 token JSON"""
+def _load_token_from_keyring(Credentials):
+    """從 keyring 載入 token JSON
+
+    Credentials: google.oauth2.credentials.Credentials 類別（由呼叫端傳入避免重複 import）
+    """
     try:
         import keyring
-        from google.oauth2.credentials import Credentials
+        import json
         data = keyring.get_password(_KEYRING_SERVICE, _KEYRING_ACCOUNT)
         if data:
-            return Credentials.from_authorized_user_info(
-                __import__("json").loads(data), SCOPES
-            )
+            return Credentials.from_authorized_user_info(json.loads(data), SCOPES)
     except Exception:
         pass
     return None
@@ -123,7 +124,7 @@ def get_credentials(client_secret_path, token_path):
 
     # 1. 嘗試從 keyring 載入
     if use_keyring:
-        creds = _load_token_from_keyring()
+        creds = _load_token_from_keyring(Credentials)
 
     # 2. 降級：從明文檔載入
     if not creds and os.path.exists(token_path):
