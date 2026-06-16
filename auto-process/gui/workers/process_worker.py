@@ -2,7 +2,6 @@
 處理 Worker — 背景線程執行裁剪 + 儲存 + 上傳流程
 """
 import os
-import re
 import shutil
 import logging
 import threading
@@ -20,6 +19,11 @@ class ProcessWorker(threading.Thread):
     """
     背景處理線程：逐一處理影片（裁剪 → 儲存到輸出目錄 → 上傳 → 播放清單 → 縮圖）。
     透過 callback_queue 向 GUI 回報進度。
+
+    videos 格式：
+      [{'path': str, 'title': str}, ...]
+      或 review 模式：
+      [{'path': str, 'title': str, 'segments': list[list[dict]]}, ...]
     """
 
     def __init__(self, videos, callback_queue, trim_mode="auto",
@@ -33,7 +37,7 @@ class ProcessWorker(threading.Thread):
                  description_template="",
                  intro_outro=None):
         super().__init__(daemon=True)
-        self.videos = videos  # [{'path': str, 'title': str}, ...]
+        self.videos = videos  # [{'path': str, 'title': str, ...}, ...]
         self.queue = callback_queue
         self.trim_mode = trim_mode
         self.trim_enabled = trim_mode != "skip"
@@ -80,8 +84,19 @@ class ProcessWorker(threading.Thread):
         result = result.replace("{part}", "")
         return result.strip("-_ ")
 
-    def _manual_trim(self, video_path, filename, index=1):
-        """手動裁剪：根據使用者指定的時間片段直接呼叫 render_video"""
+    def _render_segments(self, video_path, filename, index, segments):
+        """
+        渲染段落清單，每個 inner list 生成一個輸出檔。
+
+        Args:
+            video_path: 原始影片路徑
+            filename: 用於 queue 訊息的顯示名
+            index: 影片序號（影響命名規則中的 {index}）
+            segments: list[list[dict]] — 每個 part 是 [{'start','end'}, ...]
+
+        Returns:
+            list[str]: 成功渲染的輸出檔路徑（可能為 []，呼叫端負責處理）
+        """
         from video_renderer import render_video
 
         src_dir = os.path.dirname(video_path)
@@ -92,12 +107,12 @@ class ProcessWorker(threading.Thread):
             base = base + "_trimmed"
 
         output_paths = []
-        total_parts = len(self.manual_segments)
+        total_parts = len(segments)
 
-        self._send(filename, "status", text="手動裁剪中...")
+        self._send(filename, "status", text="裁剪中...")
         self._send(filename, "progress", value=0.0)
 
-        for i, segments in enumerate(self.manual_segments):
+        for i, part_segments in enumerate(segments):
             if self._stopped():
                 return output_paths
 
@@ -128,23 +143,23 @@ class ProcessWorker(threading.Thread):
                     logger.error(msg)
                 return cb
 
-            success = render_video(video_path, segments, output_path,
+            success = render_video(video_path, part_segments, output_path,
                                    progress_callback=make_cb(i),
                                    error_callback=make_err_cb(filename))
 
             if success:
                 output_paths.append(output_path)
-                logger.info(f"  手動裁剪 Part {part_num}: {output_path}")
+                logger.info(f"  渲染 Part {part_num}: {output_path}")
             else:
-                logger.error(f"  手動裁剪 Part {part_num} 失敗")
+                logger.error(f"  渲染 Part {part_num} 失敗")
 
         if output_paths:
             self._send(filename, "progress", value=TRIM_PROGRESS_END,
-                       text=f"手動裁剪完成，{len(output_paths)} 個檔案")
+                       text=f"裁剪完成，{len(output_paths)} 個檔案")
         else:
-            self._send(filename, "progress", value=TRIM_PROGRESS_END, text="手動裁剪失敗")
+            self._send(filename, "progress", value=TRIM_PROGRESS_END, text="裁剪失敗")
 
-        return output_paths or [video_path]
+        return output_paths
 
     def run(self):
         from video_renderer import register_stop_event as vr_register
@@ -157,11 +172,10 @@ class ProcessWorker(threading.Thread):
                     break
 
                 video_path = video["path"]
-                video_title = video["title"]
                 filename = os.path.basename(video_path)
 
                 try:
-                    self._process_one(video_path, video_title, filename, idx)
+                    self._process_one(video, filename, idx)
                 except Exception as e:
                     logger.error(f"處理 {filename} 時發生錯誤: {e}")
                     self._send(filename, "error", text=str(e))
@@ -172,14 +186,36 @@ class ProcessWorker(threading.Thread):
         # 全部完成
         self.queue.put({"type": "all_done"})
 
-    def _process_one(self, video_path, video_title, filename, index):
+    def _process_one(self, video, filename, index):
         """處理單一影片"""
+        video_path = video["path"]
+        video_title = video["title"]
+
         # === Step 1: 裁剪 ===
         trimmed_files = []
 
-        if self.trim_mode == "manual" and self.manual_segments:
+        if self.trim_mode == "review":
+            # --- 段落確認模式：使用已審核的 segments ---
+            segments = video.get("segments", [])
+            if not segments:
+                self._send(filename, "error", text="無有效片段（已全部略過）")
+                return
+            trimmed_files = self._render_segments(video_path, filename, index, segments)
+            if not trimmed_files:
+                # 絕不 fallback 原始整支影片
+                self._send(filename, "error", text="片段渲染失敗，已中止上傳")
+                return
+
+        elif self.trim_mode == "manual" and self.manual_segments:
             # --- 手動裁剪模式 ---
-            trimmed_files = self._manual_trim(video_path, filename, index)
+            trimmed_files = self._render_segments(
+                video_path, filename, index, self.manual_segments)
+            if not trimmed_files:
+                # 手動模式：fallback 使用原始檔（保留舊行為）
+                trimmed_files = [video_path]
+                self._send(filename, "progress", value=TRIM_PROGRESS_END,
+                           text="手動裁剪失敗，使用原始檔")
+
         elif self.trim_mode == "auto":
             # --- 自動裁剪模式 ---
             self._send(filename, "status", text="偵測靜音中...")
@@ -200,10 +236,12 @@ class ProcessWorker(threading.Thread):
 
             if trimmed:
                 trimmed_files = trimmed
-                self._send(filename, "progress", value=TRIM_PROGRESS_END, text=f"裁剪完成，{len(trimmed)} 個檔案")
+                self._send(filename, "progress", value=TRIM_PROGRESS_END,
+                           text=f"裁剪完成，{len(trimmed)} 個檔案")
             else:
                 trimmed_files = [video_path]
-                self._send(filename, "progress", value=TRIM_PROGRESS_END, text="不需裁剪，使用原始檔")
+                self._send(filename, "progress", value=TRIM_PROGRESS_END,
+                           text="不需裁剪，使用原始檔")
         else:
             # --- 跳過裁剪 ---
             trimmed_files = [video_path]

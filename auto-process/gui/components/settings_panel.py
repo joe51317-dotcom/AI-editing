@@ -16,7 +16,7 @@ class SettingsPanel(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color=COLORS["bg_card"], corner_radius=CORNER_RADIUS, **kwargs)
 
-        self._current_mode = "auto"  # auto / manual / skip
+        self._current_mode = "auto"  # auto / manual / skip / review
 
         # 標題
         ctk.CTkLabel(
@@ -132,7 +132,22 @@ class SettingsPanel(ctk.CTkFrame):
             corner_radius=6,
             command=lambda: self._select_mode("skip"),
         )
-        self.skip_btn.pack(side="left")
+        self.skip_btn.pack(side="left", padx=(0, 6))
+
+        self.review_btn = ctk.CTkButton(
+            alt_row,
+            text="確認段落",
+            font=(FONT_FAMILY, FONT_SIZES["small"]),
+            fg_color=COLORS["bg_hover"],
+            hover_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            border_color=COLORS["border_subtle"],
+            border_width=1,
+            height=30,
+            corner_radius=6,
+            command=lambda: self._select_mode("review"),
+        )
+        self.review_btn.pack(side="left")
 
         # ── 手動模式子面板（預設隱藏）────────────────
         self.manual_frame = ctk.CTkFrame(content, fg_color="transparent")
@@ -382,39 +397,14 @@ class SettingsPanel(ctk.CTkFrame):
             self.badge.configure(fg_color=COLORS["border"], text_color=COLORS["text_dim"])
 
         # 次要按鈕狀態
-        if mode == "manual":
-            self.manual_btn.configure(
-                fg_color=COLORS["accent_dim"],
-                text_color=COLORS["text_primary"],
-                border_color=COLORS["accent"],
-            )
-            self.skip_btn.configure(
-                fg_color=COLORS["bg_hover"],
-                text_color=COLORS["text_secondary"],
-                border_color=COLORS["border_subtle"],
-            )
-        elif mode == "skip":
-            self.skip_btn.configure(
-                fg_color=COLORS["accent_dim"],
-                text_color=COLORS["text_primary"],
-                border_color=COLORS["accent"],
-            )
-            self.manual_btn.configure(
-                fg_color=COLORS["bg_hover"],
-                text_color=COLORS["text_secondary"],
-                border_color=COLORS["border_subtle"],
-            )
-        else:
-            self.manual_btn.configure(
-                fg_color=COLORS["bg_hover"],
-                text_color=COLORS["text_secondary"],
-                border_color=COLORS["border_subtle"],
-            )
-            self.skip_btn.configure(
-                fg_color=COLORS["bg_hover"],
-                text_color=COLORS["text_secondary"],
-                border_color=COLORS["border_subtle"],
-            )
+        _inactive = dict(fg_color=COLORS["bg_hover"], text_color=COLORS["text_secondary"],
+                         border_color=COLORS["border_subtle"])
+        _active = dict(fg_color=COLORS["accent_dim"], text_color=COLORS["text_primary"],
+                       border_color=COLORS["accent"])
+
+        self.manual_btn.configure(**(_active if mode == "manual" else _inactive))
+        self.skip_btn.configure(**(_active if mode == "skip" else _inactive))
+        self.review_btn.configure(**(_active if mode == "review" else _inactive))
 
         # 手動面板顯示/隱藏
         if mode == "manual":
@@ -503,7 +493,7 @@ class SettingsPanel(ctk.CTkFrame):
     def set_state(self, state):
         """從設定恢復面板狀態"""
         mode = state.get("trim_mode", "auto")
-        if mode in ("auto", "manual", "skip"):
+        if mode in ("auto", "manual", "skip", "review"):
             self._current_mode = mode
             self._update_visual()
 

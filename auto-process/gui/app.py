@@ -53,7 +53,15 @@ class AutoProcessApp(ctk.CTk):
         self.callback_queue = queue.Queue()
         self.processing = False
         self.current_worker = None
-        self._video_map = {}  # filename → {path, title, index}
+        self._video_map = {}  # basename → {path, title, index}
+
+        # Review 模式狀態
+        self._review_pending = []      # list of video dicts 待偵測
+        self._reviewed = {}            # abs_path → list[list[dict]]
+        self._review_gen = 0           # generation counter，用於丟棄過期訊息
+        self._review_stop = None       # threading.Event，控制偵測線程
+        self._review_dialog = None     # 目前開啟的 SegmentReviewDialog
+        self._worker_params = {}       # snapshot of worker params at begin time
 
         self._build_ui()
         self._setup_logging()
@@ -262,12 +270,34 @@ class AutoProcessApp(ctk.CTk):
         """處理來自 Worker 的訊息"""
         msg_type = msg.get("type")
 
-        # all_done 沒有 filename，需要在 item 查找前處理
+        # ── 沒有 filename 的特殊訊息，在 item 查找前處理 ──
         if msg_type == "all_done":
             if self.processing:
                 self._on_all_done()
             return
 
+        # ── Review 階段訊息（有 filename 但 progress panel 不一定有 item）──
+        if msg_type == "detect_progress":
+            gen = msg.get("gen", -1)
+            if gen != self._review_gen:
+                return
+            filename = msg.get("filename", "")
+            item = self.progress_panel.get_item(filename)
+            if item:
+                item.set_status(msg.get("text", "偵測中..."))
+                value = msg.get("value")
+                if value is not None:
+                    item.set_progress(value * 0.4)  # 偵測佔前 40%
+            return
+
+        if msg_type == "detect_done":
+            gen = msg.get("gen", -1)
+            if gen != self._review_gen:
+                return  # 過期訊息，丟棄
+            self._on_detect_done(msg)
+            return
+
+        # ── 一般 Worker 訊息 ──
         filename = msg.get("filename", "")
         item = self.progress_panel.get_item(filename)
         if not item:
@@ -367,14 +397,13 @@ class AutoProcessApp(ctk.CTk):
             self.progress_panel.add_video(filename)
             self._video_map[filename] = {"path": v["path"], "title": v["title"], "index": idx}
 
-        # 片頭/片尾設定
-        intro_outro = None
-        if self.settings_panel.is_intro_outro_enabled():
-            intro_outro = self.settings_panel.get_intro_outro_settings()
-            if not intro_outro.get("intro_path") and not intro_outro.get("outro_path"):
-                logger.warning("⚠ 片頭/片尾已啟用但未選擇圖片，將不會加入片頭/片尾")
+        # ── Review 模式：偵測 → 逐一確認 → 渲染 ──
+        if trim_mode == "review":
+            self._start_review_phase(videos)
+            return
 
-        # 啟動 Worker
+        # ── 一般模式：直接啟動 Worker ──
+        intro_outro = self._collect_intro_outro()
         from gui.workers.process_worker import ProcessWorker
         self.current_worker = ProcessWorker(
             videos=videos,
@@ -395,6 +424,273 @@ class AutoProcessApp(ctk.CTk):
         )
         self.current_worker.start()
 
+    # ── Review 階段 ───────────────────────────────────────────
+
+    def _start_review_phase(self, videos):
+        """初始化 review 階段狀態並開始逐一偵測"""
+        # Snapshot 所有 Worker 參數（review 期間禁止 UI 改動影響輸出）
+        self._worker_params = {
+            "speech_threshold": self.settings_panel.get_speech_threshold(),
+            "break_threshold": self.settings_panel.get_break_threshold(),
+            "output_dir": self.youtube_panel.get_output_dir(),
+            "upload_enabled": self.youtube_panel.is_upload_enabled(),
+            "youtube_service": self.youtube_panel.get_youtube_service(),
+            "privacy_status": self.youtube_panel.get_privacy_status(),
+            "playlist_id": self.youtube_panel.get_selected_playlist_id(),
+            "thumbnail_path": self.youtube_panel.get_thumbnail_path(),
+            "description_template": self.youtube_panel.get_description(),
+            "naming_rule": self.video_panel.get_naming_rule(),
+            "intro_outro": self._collect_intro_outro(),
+        }
+
+        self._review_pending = list(videos)
+        self._reviewed = {}
+        self._review_gen += 1
+
+        # 禁用影響輸出的 UI（video_panel / youtube_panel / naming）
+        self._lock_ui_for_review(True)
+
+        # 開始偵測第一部
+        self._review_next()
+
+    def _review_next(self):
+        """取下一部影片開始背景偵測；清單空則啟動 ProcessWorker"""
+        if not self._review_pending:
+            self._start_worker_with_reviewed()
+            return
+
+        video = self._review_pending.pop(0)
+        video_path = video["path"]
+        filename = os.path.basename(video_path)
+        gen = self._review_gen
+
+        item = self.progress_panel.get_item(filename)
+        if item:
+            item.set_status("偵測靜音中...")
+
+        # 建立偵測線程專屬的 stop event
+        self._review_stop = threading.Event()
+
+        def _detect():
+            try:
+                from silence_detector import register_stop_event, split_into_parts
+                register_stop_event(self._review_stop)
+
+                parts = None
+                status = "error"
+
+                try:
+                    def progress_cb(pct, text):
+                        if self._review_stop.is_set():
+                            return
+                        self.callback_queue.put({
+                            "type": "detect_progress",
+                            "filename": filename,
+                            "value": pct,
+                            "text": text,
+                            "gen": gen,
+                        })
+
+                    raw = split_into_parts(
+                        video_path,
+                        speech_threshold_db=self._worker_params["speech_threshold"],
+                        break_threshold=self._worker_params["break_threshold"],
+                        progress_callback=progress_cb,
+                    )
+                except Exception as e:
+                    logger.error(f"偵測失敗 {filename}: {e}")
+                    raw = None
+
+                if self._review_stop.is_set():
+                    status = "stopped"
+                elif raw is None:
+                    status = "error"
+                elif len(raw) == 0:
+                    # split_into_parts 回傳 [] 代表整支保留（無長休息）或失敗
+                    # 後者已在 except 分支處理，此處視為 no_trim
+                    status = "no_trim"
+                else:
+                    status = "parts"
+                    parts = raw
+
+                register_stop_event(None)
+
+                self.callback_queue.put({
+                    "type": "detect_done",
+                    "filename": filename,
+                    "path": video_path,
+                    "video": video,
+                    "parts": parts,
+                    "status": status,
+                    "gen": gen,
+                })
+            except Exception as e:
+                logger.error(f"偵測線程錯誤: {e}")
+                self.callback_queue.put({
+                    "type": "detect_done",
+                    "filename": filename,
+                    "path": video_path,
+                    "video": video,
+                    "parts": None,
+                    "status": "error",
+                    "gen": gen,
+                })
+
+        threading.Thread(target=_detect, daemon=True).start()
+
+    def _on_detect_done(self, msg):
+        """處理偵測完成訊息，決定是否開段落確認視窗"""
+        filename = msg["filename"]
+        video_path = msg["path"]
+        video = msg["video"]
+        status = msg["status"]
+        parts = msg.get("parts")
+
+        item = self.progress_panel.get_item(filename)
+
+        if status == "stopped":
+            logger.info(f"{filename}: 偵測已停止")
+            if item:
+                item.set_status("已停止")
+            return
+
+        if status == "error":
+            logger.error(f"{filename}: 偵測失敗")
+            if item:
+                item.set_error("偵測失敗")
+            # 繼續下一部（不中斷整批）
+            self._review_next()
+            return
+
+        if status == "no_trim":
+            # 整支保留，視為單一 part，無需彈窗直接加入
+            logger.info(f"{filename}: 不需裁剪，以整支影片為單一 Part")
+            if item:
+                item.set_status("不需裁剪（已確認）")
+            from silence_detector import get_video_duration
+            try:
+                dur = get_video_duration(video_path)
+                auto_parts = [[{"start": 0.0, "end": dur}]]
+            except Exception:
+                auto_parts = [[{"start": 0.0, "end": 0.0}]]
+            self._reviewed[os.path.abspath(video_path)] = auto_parts
+            self._review_next()
+            return
+
+        # status == "parts" → 開確認視窗
+        if item:
+            item.set_status(f"等待段落確認（{len(parts)} 段）...")
+        if item:
+            item.set_progress(0.4)
+
+        total_videos = len(self._reviewed) + len(self._review_pending) + 1
+        reviewed_count = len(self._reviewed) + 1
+
+        from gui.components.segment_review_dialog import SegmentReviewDialog
+
+        def on_confirm(segments):
+            self._review_dialog = None
+            abs_path = os.path.abspath(video_path)
+            self._reviewed[abs_path] = segments
+            fn_item = self.progress_panel.get_item(filename)
+            if fn_item:
+                fn_item.set_status(f"已確認 {len(segments)} 段")
+            self._review_next()
+
+        def on_cancel():
+            self._review_dialog = None
+            logger.info("使用者取消段落確認，中止整批")
+            self._abort_review()
+
+        self._review_dialog = SegmentReviewDialog(
+            master=self,
+            video_path=video_path,
+            parts=parts,
+            video_index=reviewed_count,
+            total_videos=total_videos,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel,
+        )
+
+    def _start_worker_with_reviewed(self):
+        """所有影片確認完畢，組裝 videos 清單並啟動 ProcessWorker"""
+        self._lock_ui_for_review(False)
+
+        # 組裝帶 segments 的 video 清單
+        reviewed_videos = []
+        for filename, info in self._video_map.items():
+            abs_path = os.path.abspath(info["path"])
+            segments = self._reviewed.get(abs_path)
+            if not segments:
+                logger.warning(f"{filename}: 沒有找到 reviewed segments，略過")
+                continue
+            reviewed_videos.append({
+                "path": info["path"],
+                "title": info["title"],
+                "segments": segments,
+            })
+
+        if not reviewed_videos:
+            logger.error("沒有可處理的影片（全部略過或偵測失敗）")
+            self._on_all_done()
+            return
+
+        params = self._worker_params
+        from gui.workers.process_worker import ProcessWorker
+        self.current_worker = ProcessWorker(
+            videos=reviewed_videos,
+            callback_queue=self.callback_queue,
+            trim_mode="review",
+            output_dir=params["output_dir"],
+            upload_enabled=params["upload_enabled"],
+            youtube_service=params["youtube_service"],
+            privacy_status=params["privacy_status"],
+            playlist_id=params["playlist_id"],
+            thumbnail_path=params["thumbnail_path"],
+            description_template=params["description_template"],
+            naming_rule=params["naming_rule"],
+            intro_outro=params["intro_outro"],
+        )
+        self.current_worker.start()
+
+    def _abort_review(self):
+        """取消整批 review，重置所有狀態"""
+        self._review_gen += 1  # 讓在途 detect_done 失效
+        if self._review_stop:
+            self._review_stop.set()
+        self._review_pending.clear()
+        self._reviewed.clear()
+        self._review_dialog = None
+        self._lock_ui_for_review(False)
+        self.processing = False
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.progress_panel.stop_timer()
+        logger.info("段落確認已取消")
+
+    def _lock_ui_for_review(self, lock: bool):
+        """review 期間鎖定影響輸出的 UI 元件"""
+        state = "disabled" if lock else "normal"
+        try:
+            self.video_panel.configure(state=state)
+        except Exception:
+            pass
+        try:
+            self.youtube_panel.configure(state=state)
+        except Exception:
+            pass
+
+    # ── 一般流程 ──────────────────────────────────────────────
+
+    def _collect_intro_outro(self):
+        """收集片頭/片尾設定"""
+        if self.settings_panel.is_intro_outro_enabled():
+            io = self.settings_panel.get_intro_outro_settings()
+            if not io.get("intro_path") and not io.get("outro_path"):
+                logger.warning("⚠ 片頭/片尾已啟用但未選擇圖片，將不會加入片頭/片尾")
+            return io
+        return None
+
     def _on_tab_change(self, idx: int):
         """切換分頁：互斥顯示 YouTube / Settings 面板"""
         if idx == 0:
@@ -405,10 +701,21 @@ class AutoProcessApp(ctk.CTk):
             self.settings_panel.grid()
 
     def _stop_processing(self):
-        """停止處理"""
+        """停止處理（含 review 階段偵測線程）"""
+        if self._review_stop:
+            self._review_stop.set()
+        self._review_gen += 1  # 讓在途 detect_done 失效
+        if self._review_dialog:
+            try:
+                self._review_dialog.destroy()
+            except Exception:
+                pass
+            self._review_dialog = None
         if self.current_worker:
             self.current_worker.stop()
             logger.info("正在停止...")
+        if self._review_pending or self._reviewed:
+            self._abort_review()
 
     def _on_all_done(self):
         """所有處理完成"""
@@ -416,6 +723,7 @@ class AutoProcessApp(ctk.CTk):
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.current_worker = None
+        self._lock_ui_for_review(False)  # 確保 UI 解鎖
         self.progress_panel.stop_timer()
 
         # 完成通知
@@ -432,18 +740,50 @@ class AutoProcessApp(ctk.CTk):
             return
 
         trim_mode = self.settings_panel.get_trim_mode()
+        abs_path = os.path.abspath(info["path"])
 
+        intro_outro = self._collect_intro_outro()
+
+        if trim_mode == "review":
+            # review 模式：使用已存的 segments 直接重跑，不重新偵測
+            segments = self._reviewed.get(abs_path)
+            if not segments:
+                logger.warning(f"找不到 {filename} 的已審核 segments，無法重試")
+                return
+            from gui.workers.process_worker import ProcessWorker
+            worker = ProcessWorker(
+                videos=[{"path": info["path"], "title": info["title"],
+                         "segments": segments}],
+                callback_queue=self.callback_queue,
+                trim_mode="review",
+                output_dir=self._worker_params.get("output_dir",
+                    self.youtube_panel.get_output_dir()),
+                upload_enabled=self._worker_params.get("upload_enabled",
+                    self.youtube_panel.is_upload_enabled()),
+                youtube_service=self._worker_params.get("youtube_service",
+                    self.youtube_panel.get_youtube_service()),
+                privacy_status=self._worker_params.get("privacy_status",
+                    self.youtube_panel.get_privacy_status()),
+                playlist_id=self._worker_params.get("playlist_id",
+                    self.youtube_panel.get_selected_playlist_id()),
+                thumbnail_path=self._worker_params.get("thumbnail_path",
+                    self.youtube_panel.get_thumbnail_path()),
+                description_template=self._worker_params.get("description_template",
+                    self.youtube_panel.get_description()),
+                naming_rule=self._worker_params.get("naming_rule",
+                    self.video_panel.get_naming_rule()),
+                intro_outro=intro_outro,
+            )
+            worker.start()
+            logger.info(f"重試（review）: {filename}")
+            return
+
+        # 非 review 模式
         manual_segments = None
         if trim_mode == "manual":
             segments, errors = self.settings_panel.get_manual_segments()
             if not errors and segments:
                 manual_segments = segments
-
-        intro_outro = None
-        if self.settings_panel.is_intro_outro_enabled():
-            intro_outro = self.settings_panel.get_intro_outro_settings()
-            if not intro_outro.get("intro_path") and not intro_outro.get("outro_path"):
-                logger.warning("⚠ 片頭/片尾已啟用但未選擇圖片，將不會加入片頭/片尾")
 
         from gui.workers.process_worker import ProcessWorker
         worker = ProcessWorker(
@@ -507,6 +847,15 @@ class AutoProcessApp(ctk.CTk):
         self.youtube_panel.set_state(settings)
         self.settings_panel.set_state(settings)
         self.video_panel.naming_panel.set_state(settings)
+
+        # 恢復 LosslessCut 路徑（若之前設定過）
+        lc_path = settings.get("losslesscut_path", "")
+        if lc_path:
+            try:
+                import config
+                config.LOSSLESSCUT_PATH = lc_path
+            except ImportError:
+                pass
 
         # 恢復視窗大小位置
         geo = settings.get("window_geometry")
