@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from config import configure_console
+from sync_media import load_sync_manifest, prepare_pluraleyes_sync
 from transcribe import TranscriptionOptions, add_common_arguments, transcribe_many
 
 
@@ -41,10 +42,30 @@ def main() -> int:
     videos_dir = args.videos_dir.resolve()
     if not videos_dir.is_dir():
         parser.error(f"not a directory: {videos_dir}")
-    media = find_media(videos_dir)
+    edit_dir = (args.edit_dir or (videos_dir / "edit")).resolve()
+    sync_manifest_path = args.sync_manifest.resolve() if args.sync_manifest else None
+    if args.sync_xml:
+        try:
+            sync_manifest_path = prepare_pluraleyes_sync(
+                args.sync_xml,
+                edit_dir,
+                sequence_name=args.sync_sequence,
+            )
+        except Exception as exc:
+            parser.error(str(exc))
+    if sync_manifest_path:
+        try:
+            manifest = load_sync_manifest(sync_manifest_path)
+            media = [
+                Path(entry["alignment"]["video"]["path"])
+                for entry in manifest["sources"].values()
+            ]
+        except Exception as exc:
+            parser.error(str(exc))
+    else:
+        media = find_media(videos_dir)
     if not media:
         parser.error(f"no supported media found in {videos_dir}")
-    edit_dir = (args.edit_dir or (videos_dir / "edit")).resolve()
     options = TranscriptionOptions(
         language=args.language,
         diarize=args.diarize,
@@ -55,6 +76,8 @@ def main() -> int:
         low_memory=args.low_memory,
         force=args.force,
         strong_cache_hash=args.strong_cache_hash,
+        sync_manifest=sync_manifest_path,
+        sync_sequence=args.sync_sequence,
     )
     try:
         outputs = transcribe_many(media, edit_dir, options)

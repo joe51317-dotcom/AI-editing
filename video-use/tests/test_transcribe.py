@@ -106,6 +106,58 @@ def test_valid_cache_skips_asr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert "local faster-whisper ASR" not in stages
 
 
+def test_sync_manifest_transcribes_aligned_audio_and_invalidates_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_fake_runtime(monkeypatch, tmp_path)
+    video = tmp_path / "take.mp4"
+    aligned = tmp_path / "edit" / "sync" / "audio" / "take.wav"
+    video.write_bytes(b"video")
+    aligned.parent.mkdir(parents=True)
+    aligned.write_bytes(b"aligned-v1")
+
+    def signature(path: Path) -> dict:
+        stat = path.stat()
+        return {
+            "path": str(path.resolve()), "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+            "quick_sha256": transcribe.source_signature(path, 5.0)["quick_sha256"],
+        }
+
+    alignment = {
+        "backend": "pluraleyes-xml", "audio_offset_s": 1.0,
+        "coverage": {"video_start_s": 0, "video_end_s": 5, "audio_start_s": 1, "audio_end_s": 6},
+        "gap_policy": "silence", "video": signature(video), "audio": signature(aligned),
+        "aligned_audio": signature(aligned), "confidence": None,
+    }
+    manifest = {"schema_version": 1, "gap_policy": "silence", "sources": {"take": {
+        "source_id": "take", "alignment": alignment, "materialized_path": None,
+    }}}
+    manifest_path = tmp_path / "edit" / "sync_manifest.json"
+    manifest_path.parent.mkdir(exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(transcribe, "load_sync_manifest", lambda path: manifest)
+    monkeypatch.setattr(transcribe, "find_manifest_entry", lambda data, path: data["sources"]["take"])
+
+    captured_inputs: list[str] = []
+    original_run = transcribe.run_checked
+
+    def capture_run(command, **kwargs):
+        command_strings = [str(value) for value in command]
+        if "asr" in command_strings:
+            jobs = json.loads(Path(command_strings[-1]).read_text())
+            captured_inputs.extend(job["input"] for job in jobs["jobs"])
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(transcribe, "run_checked", capture_run)
+    [output] = transcribe.transcribe_many(
+        [video], tmp_path / "edit", TranscriptionOptions(sync_manifest=manifest_path), verbose=False
+    )
+    data = json.loads(output.read_text())
+    assert captured_inputs == [str(aligned)]
+    assert data["audio_alignment"]["gap_policy"] == "silence"
+    assert data["transcription"]["audio_alignment_sha256"]
+
+
 @pytest.mark.parametrize(("payload", "label"), [({"words": []}, "legacy"), ("{bad", "invalid")])
 def test_old_cache_is_backed_up_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object, label: str

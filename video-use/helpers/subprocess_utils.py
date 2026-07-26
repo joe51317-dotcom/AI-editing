@@ -44,6 +44,8 @@ def run_checked(
             check=True,
             capture_output=capture_output,
             text=text,
+            encoding="utf-8" if text else None,
+            errors="replace" if text else None,
             env=env,
         )
     except FileNotFoundError as exc:

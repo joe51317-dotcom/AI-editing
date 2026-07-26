@@ -30,6 +30,7 @@ from pathlib import Path
 from config import configure_console, font_family_name, load_config, resolve_font_path, validate_cjk_font
 from grade import auto_grade_for_clip, get_preset
 from subprocess_utils import run_checked
+from sync_media import find_manifest_entry, load_sync_manifest
 from transcript_v2 import join_tokens, validate_transcript
 
 
@@ -91,6 +92,11 @@ def resolve_path(maybe_path: str, base: Path) -> Path:
     return (base / p).resolve()
 
 
+def load_edl(path: Path) -> dict:
+    """Load EDL JSON as UTF-8 so Traditional Chinese Windows paths stay exact."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
 #
 # iPhone defaults to HLG HDR in Rec.2020 (and many mirrorless cameras ship PQ).
@@ -131,11 +137,20 @@ def is_portrait_source(video: Path) -> bool:
     """Return True if the video's height > width (portrait / vertical)."""
     out = run_checked(
         ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height",
-         "-of", "csv=p=0", str(video)],
+         "-show_entries", "stream=width,height:stream_tags=rotate:stream_side_data=rotation",
+         "-of", "json", str(video)],
         stage="probe frame dimensions",
     )
-    width, height = map(int, out.stdout.strip().split(","))
+    try:
+        stream = json.loads(out.stdout)["streams"][0]
+        width, height = int(stream["width"]), int(stream["height"])
+        rotations = [item.get("rotation") for item in stream.get("side_data_list", [])]
+        rotations.append(stream.get("tags", {}).get("rotate"))
+        rotation = next((int(value) for value in rotations if value is not None), 0)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+        raise RuntimeError(f"ffprobe returned invalid frame dimensions for {video}: {out.stdout!r}")
+    if abs(rotation) % 180 == 90:
+        width, height = height, width
     return height > width
 
 
@@ -150,6 +165,7 @@ def extract_segment(
     out_path: Path,
     preview: bool = False,
     draft: bool = False,
+    audio_source: Path | None = None,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -188,11 +204,15 @@ def extract_segment(
     else:
         preset, crf = "fast", "20"
 
+    inputs = ["-ss", f"{seg_start:.3f}", "-i", str(source)]
+    maps: list[str] = []
+    if audio_source is not None:
+        inputs += ["-ss", f"{seg_start:.3f}", "-i", str(audio_source)]
+        maps = ["-map", "0:v:0", "-map", "1:a:0"]
     cmd = [
-        "ffmpeg", "-y",
-        "-ss", f"{seg_start:.3f}",
-        "-i", str(source),
+        "ffmpeg", "-y", *inputs,
         "-t", f"{duration:.3f}",
+        *maps,
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
@@ -226,6 +246,10 @@ def extract_all_segments(
 
     ranges = edl["ranges"]
     sources = edl["sources"]
+    sync_manifest = None
+    if edl.get("sync_manifest"):
+        manifest_path = resolve_path(edl["sync_manifest"], edit_dir)
+        sync_manifest = load_sync_manifest(manifest_path)
 
     seg_paths: list[Path] = []
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
@@ -234,6 +258,10 @@ def extract_all_segments(
     for i, r in enumerate(ranges):
         src_name = r["source"]
         src_path = resolve_path(sources[src_name], edit_dir)
+        audio_source = None
+        if sync_manifest is not None:
+            sync_entry = find_manifest_entry(sync_manifest, src_path)
+            audio_source = Path(sync_entry["alignment"]["aligned_audio"]["path"])
         start = float(r["start"])
         end = float(r["end"])
         duration = end - start
@@ -248,7 +276,16 @@ def extract_all_segments(
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft)
+        extract_segment(
+            src_path,
+            start,
+            duration,
+            seg_filter,
+            out_path,
+            preview=preview,
+            draft=draft,
+            audio_source=audio_source,
+        )
         seg_paths.append(out_path)
 
     return seg_paths
@@ -609,7 +646,7 @@ def main() -> None:
     if not edl_path.exists():
         sys.exit(f"edl not found: {edl_path}")
 
-    edl = json.loads(edl_path.read_text())
+    edl = load_edl(edl_path)
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 

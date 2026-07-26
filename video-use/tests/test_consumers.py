@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -85,3 +86,57 @@ def test_windows_subtitle_filter_uses_forward_slashes(
     filter_graph = captured[captured.index("-filter_complex") + 1]
     assert "\\tmp\\" not in filter_graph
     assert "/master.srt" in filter_graph.lower()
+
+
+def test_extract_segment_uses_aligned_audio_when_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "take.mov"
+    audio = tmp_path / "take.wav"
+    source.write_bytes(b"video")
+    audio.write_bytes(b"audio")
+    captured: list[str] = []
+    monkeypatch.setattr(render, "is_portrait_source", lambda path: False)
+    monkeypatch.setattr(render, "is_hdr_source", lambda path: False)
+    monkeypatch.setattr(render, "run_checked", lambda command, **kwargs: captured.extend(map(str, command)))
+    render.extract_segment(source, 1.25, 2.0, "", tmp_path / "out.mp4", audio_source=audio)
+    assert captured.count("-ss") == 2
+    assert captured[captured.index("-map") + 1] == "0:v:0"
+    second_map = captured.index("-map", captured.index("-map") + 1)
+    assert captured[second_map + 1] == "1:a:0"
+    assert str(audio) in captured
+
+
+def test_extract_segment_without_manifest_keeps_single_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "take.mov"
+    source.write_bytes(b"video")
+    captured: list[str] = []
+    monkeypatch.setattr(render, "is_portrait_source", lambda path: False)
+    monkeypatch.setattr(render, "is_hdr_source", lambda path: False)
+    monkeypatch.setattr(render, "run_checked", lambda command, **kwargs: captured.extend(map(str, command)))
+    render.extract_segment(source, 0, 1, "", tmp_path / "out.mp4")
+    assert captured.count("-i") == 1
+    assert "-map" not in captured
+
+
+def test_edl_loader_preserves_traditional_chinese_paths(tmp_path: Path) -> None:
+    path = tmp_path / "edl.json"
+    expected = r"E:\短影音\分手療癒\影片.mov"
+    path.write_text(json.dumps({"sources": {"take": expected}}, ensure_ascii=False), encoding="utf-8")
+    assert render.load_edl(path)["sources"]["take"] == expected
+
+
+def test_portrait_probe_honors_rotation_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.dumps({
+        "streams": [{"width": 3840, "height": 2160, "side_data_list": [{"rotation": 90}]}]
+    })
+    monkeypatch.setattr(
+        render,
+        "run_checked",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=payload, stderr=""),
+    )
+    assert render.is_portrait_source(tmp_path / "中文.mov") is True

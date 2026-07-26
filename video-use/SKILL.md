@@ -46,6 +46,9 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
     ├── edl.json                 ← cut decisions
     ├── transcripts/<name>.json  ← validated local Transcript V2 cache
+    ├── sync_manifest.json       ← external-audio mapping and fingerprints
+    ├── sync/audio/<name>.wav    ← video-length aligned PCM audio
+    ├── synced/*_synced.mov      ← optional Premiere hand-off files
     ├── animations/slot_<id>/    ← per-animation source + render + reasoning
     ├── clips_graded/            ← per-segment extracts with grade + fades
     ├── master.srt               ← output-timeline subtitles
@@ -74,6 +77,8 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 
 - **`transcribe.py <video>`** — local word-level Transcript V2. `--diarize` is optional; `--num-speakers N` requires it. Cached.
 - **`transcribe_batch.py <videos_dir>`** — sequential multi-file transcription with one ASR model load. `--workers` accepts only `1`.
+- **`sync_media.py --xml <PluralEyes.xml> --edit-dir <edit>`** — select `Synced Sequence Replaced`, validate every one-to-one mapping, and create aligned PCM WAV files. Add `--materialize` only when Premiere needs synchronized MOV files.
+- **`sync_media.py <video> --external-audio <wav> --edit-dir <edit>`** — local waveform fallback for one pair when no XML exists. Low-confidence matches stop with a diagnostic report.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s).
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
@@ -83,7 +88,7 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 
 ## The process
 
-1. **Inventory.** `ffprobe` every source. `transcribe_batch.py` on the directory. `pack_transcripts.py` to produce `takes_packed.md`. Sample one or two `timeline_view`s for a visual first impression.
+1. **Inventory and sync.** `ffprobe` every source. If video and sound were recorded separately, use PluralEyes XML first; only use waveform matching when no XML mapping exists. Then run `transcribe_batch.py --sync-xml <xml>` and `pack_transcripts.py` to produce `takes_packed.md`. Sample one or two `timeline_view`s for a visual first impression.
 2. **Pre-scan for problems.** One pass over `takes_packed.md` to note verbal slips, obvious mis-speaks, or phrasings to avoid. Plain list, feed into the editor brief.
 3. **Converse.** Describe what you see in plain English. Ask questions *shaped by the material*. Collect: content type, target length/aspect, aesthetic/brand direction, pacing feel, must-preserve moments, must-cut moments, animation and grade preferences, subtitle needs. Do not use a fixed checklist — the right questions are different every time.
 4. **Propose strategy.** 4–8 sentences: shape, take choices, cut direction, animation plan, grade direction, subtitle style, length estimate. **Wait for confirmation.**
@@ -109,6 +114,31 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 - **Silence gaps are cut candidates.** Silences ≥400ms are usually the cleanest. 150–400ms phrase boundaries are usable with a visual check. <150ms is unsafe (mid-phrase).
 - **Example cut padding** (the launch video shipped with this): 50ms before the first kept word, 80ms after the last. Tighter for montage energy, looser for documentary. Stay in the 30–200ms working window (Hard Rule 7).
 - **Never reason audio and video independently.** Every cut must work on both tracks.
+- **External audio has one timeline.** Transcription and rendering must both use `sync_manifest.json`; timestamps remain source-video time. Never fill uncovered external-audio heads or tails with camera sound.
+
+## External audio and PluralEyes
+
+Use the XML as the synchronization authority. Do not re-estimate an XML mapping from waveforms.
+The helper selects the exact `Synced Sequence Replaced` sequence, interprets `timebase=30` plus
+`ntsc=TRUE` as `30000/1001 fps`, and uses each clip's `start/end/in/out`. Missing files, multiple
+overlapping audio clips, or out-of-range media stop the workflow before outputs are replaced.
+
+```powershell
+# Align all mapped external recordings; original files are untouched
+.\.venv\Scripts\python.exe helpers\sync_media.py --xml 'E:\footage\sync.xml' --edit-dir 'E:\footage\edit'
+
+# Transcribe the aligned audio while retaining original-video timestamps
+.\.venv\Scripts\python.exe helpers\transcribe_batch.py 'E:\footage' --sync-xml 'E:\footage\sync.xml' --language zh
+
+# Optional synchronized MOV files for Premiere
+.\.venv\Scripts\python.exe helpers\sync_media.py --xml 'E:\footage\sync.xml' --edit-dir 'E:\footage\edit' --materialize
+```
+
+For four recordings of the same script, compare `takes_packed.md` beat by beat, choose complete
+sentences at word boundaries from the strongest take, and freely alternate sources in `ranges`.
+Before preview rendering, add `"sync_manifest": "sync_manifest.json"` to the EDL. The aligned WAV
+has the same duration and time zero as its original video, so a range such as `12.4–16.8` cuts the
+same moment from picture, transcript, and external sound.
 
 ## The packed transcript (primary reading view)
 
@@ -271,6 +301,7 @@ Match the source unless the user asked for something specific. Common targets: `
 ```json
 {
   "version": 1,
+  "sync_manifest": "sync_manifest.json",
   "sources": {"C0103": "/abs/path/C0103.MP4", "C0108": "/abs/path/C0108.MP4"},
   "ranges": [
     {"source": "C0103", "start": 2.42, "end": 6.85,

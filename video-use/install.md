@@ -50,6 +50,11 @@ running session may have cached skill discovery.
 .\.venv\Scripts\python.exe helpers\pack_transcripts.py --edit-dir <edit-dir>
 ```
 
+For separately recorded audio, run `helpers\sync_media.py --xml <PluralEyes.xml> --edit-dir
+<edit-dir>` before transcription, or pass the same XML directly to `transcribe.py` /
+`transcribe_batch.py` with `--sync-xml`. This creates only aligned WAV cache files by default.
+Use `--materialize` when synchronized PCM-audio MOV files are specifically needed for Premiere.
+
 For multiple speakers, add `--diarize`; `--num-speakers N` is valid only with that flag. The
 diarization model requires the workstation's existing Hugging Face token and accepted model terms.
 If CUDA memory is exhausted, retry explicitly with `--low-memory`; this changes only the compute

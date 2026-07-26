@@ -7,6 +7,7 @@ Transcript V2 JSON in <edit_dir>/transcripts/<source_stem>.json.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -18,6 +19,12 @@ from typing import Any
 from config import VideoUseConfig, configure_console, load_config
 from doctor import run_doctor
 from subprocess_utils import run_checked
+from sync_media import (
+    DEFAULT_SEQUENCE,
+    find_manifest_entry,
+    load_sync_manifest,
+    prepare_pluraleyes_sync,
+)
 from transcript_v2 import (
     SCHEMA_VERSION,
     archive_cache,
@@ -43,14 +50,20 @@ class TranscriptionOptions:
     low_memory: bool = False
     force: bool = False
     strong_cache_hash: bool = False
+    sync_xml: Path | None = None
+    sync_manifest: Path | None = None
+    sync_sequence: str = DEFAULT_SEQUENCE
 
 
 @dataclass
 class PendingMedia:
     video: Path
+    asr_input: Path
     out_path: Path
     source: dict[str, Any]
+    settings: dict[str, Any]
     existing_label: str | None
+    audio_alignment: dict[str, Any] | None = None
     raw_asr_path: Path | None = None
     wav_path: Path | None = None
     diarization_path: Path | None = None
@@ -137,6 +150,11 @@ def _write_job_file(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _alignment_fingerprint(alignment: dict[str, Any]) -> str:
+    payload = json.dumps(alignment, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def transcribe_many(
     videos: list[Path],
     edit_dir: Path,
@@ -148,6 +166,19 @@ def transcribe_many(
         raise ValueError("--num-speakers requires --diarize")
     if options.num_speakers is not None and options.num_speakers < 1:
         raise ValueError("--num-speakers must be at least 1")
+    if options.sync_xml is not None and options.sync_manifest is not None:
+        raise ValueError("--sync-xml cannot be combined with --sync-manifest")
+
+    sync_manifest: dict[str, Any] | None = None
+    if options.sync_xml is not None:
+        manifest_path = prepare_pluraleyes_sync(
+            options.sync_xml,
+            edit_dir,
+            sequence_name=options.sync_sequence,
+        )
+        sync_manifest = load_sync_manifest(manifest_path)
+    elif options.sync_manifest is not None:
+        sync_manifest = load_sync_manifest(options.sync_manifest.resolve())
 
     config = load_config()
     settings = _effective_settings(config, options)
@@ -172,14 +203,30 @@ def transcribe_many(
             raise FileNotFoundError(f"media not found: {video}")
         duration = _probe_duration(video)
         source = source_signature(video, duration, strong=options.strong_cache_hash)
+        asr_input = video
+        audio_alignment = None
+        item_settings = dict(settings)
+        if sync_manifest is not None:
+            entry = find_manifest_entry(sync_manifest, video)
+            audio_alignment = entry["alignment"]
+            asr_input = Path(audio_alignment["aligned_audio"]["path"])
+            item_settings["audio_alignment_sha256"] = _alignment_fingerprint(audio_alignment)
         out_path = transcripts_dir / f"{video.stem}.json"
         cached, label = _existing_cache_label(out_path)
-        if not options.force and cached is not None and cache_matches(cached, source, settings):
+        if not options.force and cached is not None and cache_matches(cached, source, item_settings):
             if verbose:
                 print(f"cached: {out_path.name}")
             outputs.append(out_path)
             continue
-        pending.append(PendingMedia(video=video, out_path=out_path, source=source, existing_label=label))
+        pending.append(PendingMedia(
+            video=video,
+            asr_input=asr_input,
+            out_path=out_path,
+            source=source,
+            settings=item_settings,
+            existing_label=label,
+            audio_alignment=audio_alignment,
+        ))
 
     if not pending:
         return outputs
@@ -199,7 +246,7 @@ def transcribe_many(
                 "compute_type": settings["compute_type"],
                 "language": options.language,
                 "jobs": [
-                    {"input": str(item.video), "output": str(item.raw_asr_path)}
+                    {"input": str(item.asr_input), "output": str(item.raw_asr_path)}
                     for item in pending
                 ],
             },
@@ -218,7 +265,7 @@ def transcribe_many(
             for index, item in enumerate(pending):
                 item.wav_path = temp_dir / f"diarize-{index:04d}.wav"
                 item.diarization_path = temp_dir / f"diarize-{index:04d}.json"
-                _extract_diarization_wav(item.video, item.wav_path)
+                _extract_diarization_wav(item.asr_input, item.wav_path)
                 diarization_jobs.append(
                     {
                         "input": str(item.wav_path),
@@ -264,13 +311,14 @@ def transcribe_many(
                 "schema_version": SCHEMA_VERSION,
                 "source": item.source,
                 "transcription": {
-                    **settings,
+                    **item.settings,
                     "language": raw_asr.get("language"),
                     "language_probability": raw_asr.get("language_probability"),
                 },
                 "words": words,
                 "speaker_turns": turns,
                 "events": [],
+                "audio_alignment": item.audio_alignment,
                 "created_at": utc_now(),
             }
             validate_transcript(transcript)
@@ -299,6 +347,9 @@ def transcribe_one(
     low_memory: bool = False,
     force: bool = False,
     strong_cache_hash: bool = False,
+    sync_xml: Path | None = None,
+    sync_manifest: Path | None = None,
+    sync_sequence: str = DEFAULT_SEQUENCE,
     verbose: bool = True,
 ) -> Path:
     outputs = transcribe_many(
@@ -314,6 +365,9 @@ def transcribe_one(
             low_memory=low_memory,
             force=force,
             strong_cache_hash=strong_cache_hash,
+            sync_xml=sync_xml,
+            sync_manifest=sync_manifest,
+            sync_sequence=sync_sequence,
         ),
         verbose=verbose,
     )
@@ -330,6 +384,9 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--low-memory", action="store_true", help="Use int8_float16 on CUDA or int8 on CPU")
     parser.add_argument("--force", action="store_true", help="Ignore a valid cache and transcribe again")
     parser.add_argument("--strong-cache-hash", action="store_true", help="Hash the complete media file")
+    parser.add_argument("--sync-xml", type=Path, help="PluralEyes XML used to align external audio")
+    parser.add_argument("--sync-manifest", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--sync-sequence", default=DEFAULT_SEQUENCE, help="Exact PluralEyes sequence name")
 
 
 def main() -> int:
@@ -341,6 +398,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.num_speakers is not None and not args.diarize:
         parser.error("--num-speakers requires --diarize")
+    if args.sync_xml and args.sync_manifest:
+        parser.error("--sync-xml cannot be combined with --sync-manifest")
     video = args.video.resolve()
     edit_dir = (args.edit_dir or (video.parent / "edit")).resolve()
     try:
@@ -356,6 +415,9 @@ def main() -> int:
             low_memory=args.low_memory,
             force=args.force,
             strong_cache_hash=args.strong_cache_hash,
+            sync_xml=args.sync_xml,
+            sync_manifest=args.sync_manifest,
+            sync_sequence=args.sync_sequence,
         )
         return 0
     except Exception as exc:

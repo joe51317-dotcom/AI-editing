@@ -31,6 +31,14 @@ def test_run_checked_success() -> None:
     assert result.stdout.strip() == "ok"
 
 
+def test_run_checked_tolerates_non_utf8_output() -> None:
+    result = run_checked(
+        [sys.executable, "-c", "import os; os.write(2, bytes([0x81]))"],
+        stage="encoding",
+    )
+    assert "\ufffd" in result.stderr
+
+
 def test_run_checked_failure_reports_stage_exit_and_tail() -> None:
     command = [sys.executable, "-c", "import sys; print('HF_TOKEN=secret', file=sys.stderr); sys.exit(7)"]
     with pytest.raises(CommandError) as raised:

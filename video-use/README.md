@@ -40,6 +40,16 @@ See [install.md](install.md) for registration and [SKILL.md](SKILL.md) for the e
 # Sequential batch; one ASR model load
 .\.venv\Scripts\python.exe helpers\transcribe_batch.py footage --language zh
 
+# PluralEyes XML: build aligned WAV files without copying 4K video
+.\.venv\Scripts\python.exe helpers\sync_media.py --xml 'footage\sync.xml' --edit-dir 'footage\edit'
+.\.venv\Scripts\python.exe helpers\transcribe_batch.py footage --sync-xml 'footage\sync.xml' --language zh
+
+# Optional Premiere hand-off: stream-copy video into MOV with 48 kHz PCM audio
+.\.venv\Scripts\python.exe helpers\sync_media.py --xml 'footage\sync.xml' --edit-dir 'footage\edit' --materialize
+
+# Without XML, correlate one camera track with one external recording locally
+.\.venv\Scripts\python.exe helpers\sync_media.py video.mov --external-audio recorder.wav --edit-dir 'footage\edit'
+
 # Pack, inspect, and render
 .\.venv\Scripts\python.exe helpers\pack_transcripts.py --edit-dir footage\edit
 .\.venv\Scripts\python.exe helpers\timeline_view.py video.mp4 10 20
@@ -49,6 +59,11 @@ See [install.md](install.md) for registration and [SKILL.md](SKILL.md) for the e
 `--low-memory` selects `int8_float16` explicitly after a CUDA out-of-memory error. It does not
 silently downgrade the model. `--strong-cache-hash` hashes the whole source; the default hashes
 metadata plus the first and last blocks for speed.
+
+PluralEyes synchronization always selects the exact `Synced Sequence Replaced` sequence unless
+`--sequence`/`--sync-sequence` explicitly names another one. The source media stays untouched.
+Uncovered heads and tails are silence, never camera audio. Add `"sync_manifest":
+"sync_manifest.json"` to `edl.json` so rendering uses the same aligned WAV files as transcription.
 
 ## Capability differences
 

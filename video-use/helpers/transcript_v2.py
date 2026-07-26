@@ -221,6 +221,16 @@ def validate_transcript(data: dict[str, Any]) -> None:
                 errors.append(f"speaker_turns[{index}] is out of range")
     if not isinstance(data.get("events"), list):
         errors.append("events must be an array")
+    audio_alignment = data.get("audio_alignment")
+    if audio_alignment is not None:
+        if not isinstance(audio_alignment, dict):
+            errors.append("audio_alignment must be an object or null")
+        else:
+            required = {"backend", "audio_offset_s", "coverage", "gap_policy", "video", "audio", "aligned_audio"}
+            if not required.issubset(audio_alignment):
+                errors.append("audio_alignment metadata is incomplete")
+            elif audio_alignment.get("gap_policy") != "silence":
+                errors.append("audio_alignment.gap_policy must be silence")
     if not isinstance(data.get("created_at"), str) or not data.get("created_at"):
         errors.append("created_at is required")
     if errors:
