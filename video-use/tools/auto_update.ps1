@@ -25,15 +25,18 @@ function Invoke-Git([string[]]$Arguments, [string]$WorkingDirectory = $ParentRep
 }
 
 try {
-    $RemoteLine = (& git ls-remote $UpstreamUrl "refs/heads/$Branch" | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0 -or -not $RemoteLine) { throw 'Could not resolve the upstream branch.' }
+    $RemoteLines = & git ls-remote $UpstreamUrl "refs/heads/$Branch"
+    if ($LASTEXITCODE -ne 0 -or -not $RemoteLines) { throw 'Could not resolve the upstream branch.' }
+    $RemoteLine = @($RemoteLines)[0]
     $UpstreamSha = ($RemoteLine -split '\s+')[0]
     if ($UpstreamSha -notmatch '^[0-9a-f]{40}$') { throw 'Upstream returned an invalid commit.' }
 
     Invoke-Git @('fetch', 'origin', $Branch)
-    $LastSplit = (& git -C $ParentRepo log "origin/$Branch" --format='%B%x00' |
-        Select-String -Pattern 'git-subtree-split: ([0-9a-f]{40})' -AllMatches |
-        ForEach-Object { $_.Matches } | Select-Object -First 1).Groups[1].Value
+    $CommitBodies = & git -C $ParentRepo log "origin/$Branch" --format='%B%x00'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read local subtree history.' }
+    $SplitMatch = [regex]::Match(($CommitBodies -join "`n"), 'git-subtree-split: ([0-9a-f]{40})')
+    if (-not $SplitMatch.Success) { throw 'No git-subtree-split marker was found on origin/main.' }
+    $LastSplit = $SplitMatch.Groups[1].Value
     if ($LastSplit -eq $UpstreamSha) {
         Write-UpdateLog "Already current at upstream $UpstreamSha."
         exit 0
