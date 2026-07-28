@@ -112,6 +112,27 @@ def fps_from_rate(timebase: str | int, ntsc: str | bool) -> Fraction:
     return Fraction(base * 1000, 1001) if is_ntsc else Fraction(base, 1)
 
 
+def rate_from_fps(fps: Fraction) -> tuple[int, bool]:
+    """Inverse of ``fps_from_rate``: express a frame rate as timebase + ntsc.
+
+    FCP7 XML has no field for a fractional rate. It stores the rounded integer
+    and an ``ntsc`` flag that means "multiply by 1000/1001", so 29.97 is written
+    as timebase 30 with ntsc TRUE. Rates that fit neither form are rejected
+    rather than rounded, because a silently rounded rate moves every cut.
+    """
+    if fps <= 0:
+        raise ValueError(f"frame rate must be positive: {fps}")
+    if fps.denominator == 1:
+        return int(fps), False
+    ntsc_base = fps * 1001 / 1000
+    if ntsc_base.denominator == 1:
+        return int(ntsc_base), True
+    raise ValueError(
+        f"frame rate {float(fps):.4f} is neither an integer nor an NTSC rate; "
+        "FCP7 XML cannot express it"
+    )
+
+
 def frames_to_seconds(frames: int | float, fps: Fraction) -> float:
     return float(Fraction(frames) / fps)
 

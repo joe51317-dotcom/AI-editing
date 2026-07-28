@@ -55,7 +55,9 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
     ├── downloads/               ← yt-dlp outputs
     ├── verify/                  ← debug frames / timeline PNGs
     ├── preview.mp4
-    └── final.mp4
+    ├── final.mp4
+    ├── final.xml                 ← Premiere sequence pointing at the original sources
+    └── final.srt                 ← the subtitles that render used, paired with the XML
 ```
 
 ## Setup
@@ -83,6 +85,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`export_premiere_xml.py <edl.json> -o <out.xml>`** — FCP7 sequence for Premiere. `render.py` runs it automatically after every successful render; run it directly to regenerate without re-rendering. `--fps`, `--sequence-size`, `--no-markers`, `--no-punch`, `--no-subtitles`.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -104,6 +107,7 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 
    If anything fails: fix → re-render → re-eval. **Cap at 3 self-eval passes** — if issues remain after 3, flag them to the user rather than looping forever. Only present the preview once the self-eval passes.
 8. **Iterate + persist.** Natural-language feedback, re-plan, re-render. Never re-transcribe. Final render on confirmation. Append to `project.md`.
+9. **Hand off to Premiere.** Every successful render writes `<output>.xml` beside the video: the same edit as a timeline pointing at the original camera files, so any cut can still be moved, extended, or replaced. Tell the user it exists and what it does not carry (see below).
 
 ## Cut craft (techniques)
 
@@ -319,6 +323,18 @@ Match the source unless the user asked for something specific. Common targets: `
 ```
 
 `grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+
+`fps` sets the rendered output rate and defaults to 24. **Set it to the source rate.** 29.97 footage forced to 24 judders, and the Premiere XML describes the sources — so when the two disagree, the XML timeline and the rendered video have different lengths and the export says so.
+
+## Premiere hand-off
+
+`render.py` writes `<output>.xml` after every successful render, plus the `.srt` that render used. The timeline points at the **original** camera files with full media length declared, so cuts can be dragged open, not just shortened. Picture and sound are bound with `<link>` elements so trimming one moves the other.
+
+What travels: cuts, punch-in framing (as a Basic Motion scale relative to the fitted size, not raw percent), animation overlays on V2, external-microphone audio when a `sync_manifest` exists, and each range's `beat` + `reason` as timeline markers.
+
+**The colour grade does not travel.** It is an ffmpeg filter string with no Premiere equivalent; the preset name is recorded in each clip's name and the user applies the look themselves. Say this out loud when handing off — a user who imports the XML expecting the graded picture will think something broke.
+
+v1 places cuts only on **constant-frame-rate sources that all share one rate**. Mixed rates and variable-frame-rate footage (common on phones) are refused rather than approximated, because a timeline that sits a few frames off every cut is worse than one that declines to be written. `--fps` overrides both refusals when the user accepts the drift.
 
 ## Memory — `project.md`
 

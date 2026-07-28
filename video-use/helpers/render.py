@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 
 from config import configure_console, font_family_name, load_config, resolve_font_path, validate_cjk_font
+from edl import load_edl, resolve_path
+from export_premiere_xml import export_or_clear
 from grade import auto_grade_for_clip, get_preset
 from subprocess_utils import run_checked
 from sync_media import find_manifest_entry, load_sync_manifest
@@ -82,19 +84,6 @@ def resolve_grade_filter(grade_field: str | None) -> str:
             print(f"warning: unknown preset '{grade_field}', using as raw filter")
             return grade_field
     return grade_field
-
-
-def resolve_path(maybe_path: str, base: Path) -> Path:
-    """Resolve a path that may be absolute or relative to `base`."""
-    p = Path(maybe_path)
-    if p.is_absolute():
-        return p
-    return (base / p).resolve()
-
-
-def load_edl(path: Path) -> dict:
-    """Load EDL JSON as UTF-8 so Traditional Chinese Windows paths stay exact."""
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
@@ -662,6 +651,11 @@ def main() -> None:
         action="store_true",
         help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
     )
+    ap.add_argument(
+        "--no-xml",
+        action="store_true",
+        help="Skip the Premiere XML written alongside the output video.",
+    )
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -711,6 +705,17 @@ def main() -> None:
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
         tmp_composite.unlink(missing_ok=True)
+
+    # 5. Premiere hand-off. The rendered file is finished; this is the version
+    # the user can still change their mind about. Never let it break a render
+    # that already succeeded — a failed export removes its own stale output so
+    # an old XML cannot pass itself off as this render's companion.
+    if not args.no_xml:
+        export_or_clear(
+            edl_path,
+            out_path.with_suffix(".xml"),
+            with_subtitles=not args.no_subtitles,
+        )
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"\ndone: {out_path} ({size_mb:.1f} MB)")

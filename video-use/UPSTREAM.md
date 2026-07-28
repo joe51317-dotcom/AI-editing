@@ -12,6 +12,16 @@ Python 3.11 runtime. It adds Transcript V2, validated/atomic caches, local faste
 optional pyannote diarization, strict runtime/font/ffmpeg checks, sequential batch processing, and
 Windows setup/skill registration documentation. Automatic voice generation is disabled.
 
+It also adds a Premiere Pro hand-off: `helpers/export_premiere_xml.py` writes the EDL as an FCP7
+sequence against the original sources, `helpers/edl.py` holds the EDL loading, validation, and
+ffprobe helpers both consumers need, and `helpers/render.py` calls the exporter after a successful
+render. `helpers/sync_media.py` gains `rate_from_fps`, the inverse of its existing `fps_from_rate`.
+
+This file is documentation, not a mechanism: the subtree merge does not read it and it does not
+protect anything. `SKILL.md` and `helpers/render.py` are the local edits most likely to conflict
+with an upstream change. `tools/auto_update.ps1` stops and leaves `main` untouched on conflict, so
+a stalled automatic update means one of those files needs a manual merge.
+
 ## Reviewing an update
 
 Run the following from the stable `video-use` directory:
