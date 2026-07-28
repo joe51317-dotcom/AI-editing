@@ -166,6 +166,8 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
     audio_source: Path | None = None,
+    punch: float = 1.0,
+    fps: str = "24",
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -188,6 +190,11 @@ def extract_segment(
     vf_parts: list[str] = []
     if is_hdr_source(source):
         vf_parts.append(TONEMAP_CHAIN)
+    # Punch-in crops at source resolution, before the 1080 scale, so a 4K
+    # source loses no detail. Used to make an unavoidable jump cut read as a
+    # deliberate framing change, and to mark a beat inside a locked-off shot.
+    if punch and punch > 1.0:
+        vf_parts.append(f"crop=iw/{punch:.4f}:ih/{punch:.4f}")
     vf_parts.append(scale)
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -216,7 +223,7 @@ def extract_segment(
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
+        "-pix_fmt", "yuv420p", "-r", fps,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
@@ -246,6 +253,10 @@ def extract_all_segments(
 
     ranges = edl["ranges"]
     sources = edl["sources"]
+    # Default 24 keeps the shipped behaviour; set `fps` in the EDL to match the
+    # source instead (29.97 footage forced to 24 drops ~1 frame in 5 and
+    # judders on a talking head).
+    fps = str(edl.get("fps", "24"))
     sync_manifest = None
     if edl.get("sync_manifest"):
         manifest_path = resolve_path(edl["sync_manifest"], edit_dir)
@@ -272,8 +283,13 @@ def extract_all_segments(
         else:
             seg_filter = resolved
 
+        punch = float(r.get("punch", 1.0))
         note = r.get("beat") or r.get("note") or ""
-        print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
+        punch_note = f"  punch×{punch:g}" if punch > 1.0 else ""
+        print(
+            f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  "
+            f"({duration:5.2f}s)  {note}{punch_note}"
+        )
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
         extract_segment(
@@ -285,6 +301,8 @@ def extract_all_segments(
             preview=preview,
             draft=draft,
             audio_source=audio_source,
+            punch=punch,
+            fps=fps,
         )
         seg_paths.append(out_path)
 
