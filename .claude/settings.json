@@ -1,0 +1,21 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "claude-reflect@claude-reflect-marketplace": true,
+    "andrej-karpathy-skills@karpathy-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-reflect-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "bayramannakov/claude-reflect"
+      }
+    },
+    "karpathy-skills": {
+      "source": {
+        "source": "github",
+        "repo": "multica-ai/andrej-karpathy-skills"
+      }
+    }
+  }
+}
